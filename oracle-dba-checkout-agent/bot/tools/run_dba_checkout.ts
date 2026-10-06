@@ -4,8 +4,10 @@ import { z } from "zod";
 import {
   CHECKOUT_SCRIPT,
   JUMP_HOST,
+  PRETZEL_LOGIN_KEY,
   assertTargetHost,
   loadSshConfig,
+  parsePretzelLogin,
   previewLog,
   runRemoteCheckout,
   type CheckoutRun,
@@ -37,7 +39,8 @@ export default defineTool({
     Run the Oracle DBA checkout. SSHes only to pretzel.int.thomsonreuters.com,
     runs sudo su - oracle, answers the ccps password prompt, then runs
     /dba/bin/dba_checkout on targetHost with no arguments. confirm must be true.
-    Passwords come from the agent environment and must not be supplied here.
+    Do not pass the pretzel account or password to this tool. Save those with
+    set_pretzel_login. This tool reads the saved login, then the environment.
   `,
   effect: "write",
   inputSchema: z.object({
@@ -68,7 +71,8 @@ export default defineTool({
       return publish(ctx, evalConfig(), evalRun(ctx.now(), target));
     }
 
-    const config = await loadSshConfig(process.env);
+    const saved = parsePretzelLogin(await ctx.host.kv.get(PRETZEL_LOGIN_KEY));
+    const config = await loadSshConfig(process.env, saved);
     const owner = ctx.toolCallId ?? ctx.session.id;
     await acquireLock(ctx, owner, config.timeoutSeconds);
     try {
