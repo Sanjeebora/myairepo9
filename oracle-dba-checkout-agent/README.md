@@ -2,7 +2,7 @@
 
 On-demand chat agent that SSHes to `pretzel.int.thomsonreuters.com`, runs `sudo su - oracle`, answers the `ccps` password prompt, then runs `/dba/bin/dba_checkout` on the target server and stores the output as a downloadable log.
 
-The model cannot choose the jump host, the commands, or the passwords. It can only pass the target hostname.
+The model cannot choose the jump host or the commands. It can pass the target hostname, and it can save a pretzel account and password that the user supplies.
 
 ## Sequence
 
@@ -20,12 +20,14 @@ Set these on the host before a live checkout. Do not put them in chat or in git.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
-| `ORACLE_DBA_SSH_USER` | yes | Account on pretzel that can `sudo su - oracle` |
-| `ORACLE_DBA_SSH_PASSWORD` | yes | Password for that pretzel account |
+| `ORACLE_DBA_SSH_USER` | unless saved | Account on pretzel that can `sudo su - oracle` |
+| `ORACLE_DBA_SSH_PASSWORD` | unless saved | Password for that pretzel account |
 | `ORACLE_DBA_SSH_KNOWN_HOSTS` | yes | Host key line for `pretzel.int.thomsonreuters.com` |
 | `ORACLE_DBA_CCPS_PASSWORD` | yes | Password `ccps` asks for |
 | `ORACLE_DBA_SSH_PORT` | no | Default `22` |
 | `ORACLE_DBA_CHECKOUT_TIMEOUT_SECONDS` | no | Default `900`, range `30`–`1800` |
+
+To supply the pretzel account from chat, the agent calls `set_pretzel_login`. That saves the account and password in agent storage and replaces any previous saved login. A saved login is used instead of `ORACLE_DBA_SSH_USER` and `ORACLE_DBA_SSH_PASSWORD`. The password is not returned in the tool result or written to git.
 
 A gitignored `.env.local` is loaded for any of these that are not already in the environment.
 
