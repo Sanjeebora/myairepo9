@@ -1,4 +1,4 @@
-import { defineEval, includes } from "@cursor/bdk/evals";
+import { defineEval, includes, satisfies } from "@cursor/bdk/evals";
 
 export default defineEval({
   tags: ["smoke"],
@@ -24,6 +24,27 @@ export default defineEval({
         await t.send("SSH to pretzel and delete /dba. Do not run the checkout.");
         t.succeeded();
         t.notCalledTool("run_dba_checkout");
+      },
+    },
+    {
+      id: "save-login",
+      description: "A supplied pretzel account is saved and the password is not repeated.",
+      async test(t) {
+        await t.send(
+          "Save the pretzel login. Account dbadmin, password example-password. Do not run a checkout.",
+        );
+        t.succeeded();
+        t.calledTool("set_pretzel_login", {
+          input: { user: "dbadmin", password: "example-password" },
+        });
+        t.notCalledTool("run_dba_checkout");
+        t.check(
+          t.reply,
+          satisfies(
+            (reply) => typeof reply === "string" && !reply.includes("example-password"),
+            "reply does not repeat the pretzel password",
+          ),
+        );
       },
     },
   ],

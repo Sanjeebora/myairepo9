@@ -52,6 +52,29 @@ type DialogResult = {
   truncated: boolean;
 };
 
+export const PRETZEL_LOGIN_KEY = "pretzel-login";
+
+export type PretzelLogin = {
+  user: string;
+  password: string;
+};
+
+export function assertPretzelUser(user: string): string {
+  const value = user.trim();
+  if (!USER.test(value)) {
+    throw new Error("Pretzel login account must be a Unix account name.");
+  }
+  return value;
+}
+
+export function parsePretzelLogin(value: unknown): PretzelLogin | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const record = value as { user?: unknown; password?: unknown };
+  if (typeof record.user !== "string" || typeof record.password !== "string") return undefined;
+  if (record.password.length === 0 || record.password.length > 256) return undefined;
+  return { user: assertPretzelUser(record.user), password: record.password };
+}
+
 export function assertTargetHost(host: string): string {
   const value = host.trim();
   if (!HOSTNAME.test(value) && !IPV4.test(value)) {
@@ -63,21 +86,19 @@ export function assertTargetHost(host: string): string {
   return value;
 }
 
-export async function loadSshConfig(env: NodeJS.ProcessEnv): Promise<SshConfig> {
+export async function loadSshConfig(
+  env: NodeJS.ProcessEnv,
+  saved?: PretzelLogin,
+): Promise<SshConfig> {
   const merged = await mergedEnv(env);
-  const user = required(merged, "ORACLE_DBA_SSH_USER");
-  if (!USER.test(user)) {
-    throw new Error("ORACLE_DBA_SSH_USER must be a Unix account name.");
-  }
-
   const knownHosts = required(merged, "ORACLE_DBA_SSH_KNOWN_HOSTS");
   assertKnownHosts(JUMP_HOST, knownHosts);
 
   return {
     jumpHost: JUMP_HOST,
     port: parsePort(merged.ORACLE_DBA_SSH_PORT),
-    user,
-    password: required(merged, "ORACLE_DBA_SSH_PASSWORD"),
+    user: saved?.user ?? pretzelUser(merged),
+    password: saved?.password ?? pretzelPassword(merged),
     ccpsPassword: required(merged, "ORACLE_DBA_CCPS_PASSWORD"),
     knownHosts: knownHosts.trim() + "\n",
     timeoutSeconds: parseTimeout(merged.ORACLE_DBA_CHECKOUT_TIMEOUT_SECONDS),
@@ -383,6 +404,29 @@ async function mergedEnv(env: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv> {
     merged[key] = trimmed.slice(eq + 1).trim();
   }
   return merged;
+}
+
+function pretzelUser(env: NodeJS.ProcessEnv): string {
+  const value = env.ORACLE_DBA_SSH_USER?.trim() ?? "";
+  if (!value) {
+    throw new Error(
+      "Missing pretzel login account. Supply it with set_pretzel_login.",
+    );
+  }
+  return assertPretzelUser(value);
+}
+
+function pretzelPassword(env: NodeJS.ProcessEnv): string {
+  const value = env.ORACLE_DBA_SSH_PASSWORD ?? "";
+  if (!value) {
+    throw new Error(
+      "Missing pretzel login password. Supply it with set_pretzel_login.",
+    );
+  }
+  if (value.length > 256) {
+    throw new Error("Pretzel login password is too long.");
+  }
+  return value;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
