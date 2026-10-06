@@ -10,7 +10,9 @@ The model cannot choose the jump host or the commands. It can pass the target ho
 2. Run `sudo su - oracle`.
 3. Run `ccps` and answer its password prompt.
 4. From the oracle account, SSH to the named target without a password.
-5. Run `/dba/bin/dba_checkout` and save the output.
+5. Run `/dba/bin/dba_checkout` and print the output.
+6. If that output reports the database or the listener down, read `/etc/oratab` on the target. From `cdp0997z1:/u01/app/oracle/product/19.3.0.0/db:N`, the instance name is `cdp0997z1`.
+7. Run `start_oracle -i` with each instance name, then `srvctl start listener`. Comment lines are ignored. The checkout log and the start output are both in the downloadable file.
 
 `sudo` on pretzel must not ask for a password. The ccps password is not sent to sudo.
 
@@ -25,7 +27,7 @@ Set these on the host before a live checkout. Do not put them in chat or in git.
 | `ORACLE_DBA_SSH_KNOWN_HOSTS` | yes | Host key line for `pretzel.int.thomsonreuters.com` |
 | `ORACLE_DBA_CCPS_PASSWORD` | yes | Password `ccps` asks for |
 | `ORACLE_DBA_SSH_PORT` | no | Default `22` |
-| `ORACLE_DBA_CHECKOUT_TIMEOUT_SECONDS` | no | Default `900`, range `30`–`1800` |
+| `ORACLE_DBA_CHECKOUT_TIMEOUT_SECONDS` | no | Default `900`, range `30`–1800 |
 
 To supply the pretzel account from chat, the agent calls `set_pretzel_login`. That saves the account and password in agent storage and replaces any previous saved login. A saved login is used instead of `ORACLE_DBA_SSH_USER` and `ORACLE_DBA_SSH_PASSWORD`. The password is not returned in the tool result or written to git.
 
