@@ -1,0 +1,18 @@
+{
+  "name": "oracle-dba-checkout-agent",
+  "private": true,
+  "type": "module",
+  "description": "From pretzel, becomes oracle, runs ccps, then runs /dba/bin/dba_checkout on a target server.",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "dev": "bdk dev"
+  },
+  "dependencies": {
+    "@cursor/bdk": "^0.2.18",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "typescript": "6.0.3"
+  }
+}
