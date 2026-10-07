@@ -27,7 +27,7 @@ Set these on the host before a live checkout. Do not put them in chat or in git.
 | `ORACLE_DBA_SSH_KNOWN_HOSTS` | yes | Host key line for `pretzel.int.thomsonreuters.com` |
 | `ORACLE_DBA_CCPS_PASSWORD` | yes | Password `ccps` asks for |
 | `ORACLE_DBA_SSH_PORT` | no | Default `22` |
-| `ORACLE_DBA_CHECKOUT_TIMEOUT_SECONDS` | no | Default `900`, range `30`–1800 |
+| `ORACLE_DBA_CHECKOUT_TIMEOUT_SECONDS` | no | Default `900`, range `30`–`1800` |
 
 To supply the pretzel account from chat, the agent calls `set_pretzel_login`. That saves the account and password in agent storage and replaces any previous saved login. A saved login is used instead of `ORACLE_DBA_SSH_USER` and `ORACLE_DBA_SSH_PASSWORD`. The password is not returned in the tool result or written to git.
 
@@ -41,7 +41,27 @@ ssh-keyscan -p 22 -T 5 pretzel.int.thomsonreuters.com
 
 Hosted deploy egress is limited to `pretzel.int.thomsonreuters.com:22`. The second hop to the target starts on pretzel, not on the agent.
 
-## Run
+## Run on Windows
+
+Node.js 22 and the built-in OpenSSH Client are enough. Ubuntu is not required.
+
+In PowerShell:
+
+```powershell
+git clone -b cursor/oracle-dba-checkout-agent-3b21 https://github.com/Sanjeebora/myairepo9.git
+cd myairepo9\oracle-dba-checkout-agent
+npm install
+$env:ORACLE_DBA_SSH_KNOWN_HOSTS = (ssh-keyscan -t ed25519 pretzel.int.thomsonreuters.com 2>$null) -join "`n"
+$env:ORACLE_DBA_CCPS_PASSWORD = Read-Host "CCPS password"
+npx bdk login
+npx bdk dev
+```
+
+Open `http://localhost:3000/playground`. First send the pretzel account and password so they are saved. Then ask for the checkout on the target server. The log download path is in the reply.
+
+The laptop must be on the network that can reach `pretzel.int.thomsonreuters.com`. `sudo su - oracle` must not ask for its own password.
+
+## Run on Linux
 
 ```bash
 npx bdk dev
