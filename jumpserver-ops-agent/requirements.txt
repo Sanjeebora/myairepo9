@@ -1,0 +1,5 @@
+paramiko>=3.4,<4
+PyYAML>=6.0,<7
+openai>=1.40,<3
+python-dotenv>=1.0,<2
+pytest>=8.0,<9

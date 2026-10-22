@@ -1,0 +1,66 @@
+# Copy to config.yaml and edit. ${VAR} and ${VAR:-default} are read from the environment / .env.
+
+jumpserver:
+  host: jumpserver.example.com
+  port: 22
+  username: ${JUMP_USER}
+  key_file: ~/.ssh/id_rsa           # or leave out and set password_env
+  # password_env: JUMP_PASSWORD     # name of the env var holding the password
+  # key_passphrase_env: JUMP_KEY_PASSPHRASE
+  known_hosts: ~/.ssh/known_hosts
+  auto_add_host_key: false          # keep false in production; add the host key to known_hosts first
+  connect_timeout: 15
+  login_shell: true                 # run commands via `bash -lc` so ccps and PATH from profiles are available
+
+ccps:
+  command: ccps
+  # once:        run ccps once after connecting (it must exit 0), then run scripts.
+  # per_command: run ccps in the same shell before every ssh to a target. Use this if
+  #              ccps only sets up the current shell (e.g. starts an ssh-agent).
+  mode: once
+  timeout: 120
+
+# How the jumpserver reaches each target after ccps has enabled passwordless login.
+target_ssh:
+  user: oracle                      # default remote user; can be overridden per server
+  options: ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+
+servers:
+  - name: proddb01
+    host: proddb01.internal
+    tags: [prod, oracle]
+  - name: proddb02
+    host: proddb02.internal
+    tags: [prod, oracle]
+  - name: uatdb01
+    host: uatdb01.internal
+    user: dbadmin
+    tags: [uat]
+
+# Allowlist. The agent can only run the scripts listed here.
+scripts:
+  dba_checkout:
+    description: Daily DBA health checkout
+    remote_path: /home/oracle/scripts/dba_checkout.sh   # script that already exists on each target
+    args: []
+    timeout: 600
+  os_checkout:
+    description: OS checks (sent from this machine and run with `bash -s`)
+    local_file: scripts/os_checkout.sh
+    timeout: 300
+
+llm:
+  provider: openai                  # "openai" = OpenAI or any OpenAI-compatible API; "azure" = Azure OpenAI
+  model: gpt-4o                     # or your Azure deployment name / local model name
+  # base_url: https://your-llm-gateway.example.com/v1   # for OpenAI-compatible gateways; Azure endpoint for azure
+  # api_version: 2024-06-01                             # required for azure
+  api_key_env: LLM_API_KEY          # name of the env var holding your API key (do not put the key here)
+  temperature: 0.1
+  json_mode: true                   # set false if your endpoint does not support response_format
+  max_chars_per_output: 20000
+
+max_parallel: 5
+reports_dir: reports
+
+# Extra regexes whose matches are replaced with [REDACTED] before output reaches the LLM or the report.
+redact_patterns: []
