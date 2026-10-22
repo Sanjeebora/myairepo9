@@ -60,11 +60,20 @@ python -m ops_agent web              # http://127.0.0.1:5000
 
 If your endpoint rejects `response_format`, set `json_mode: false`.
 
+### Become oracle, then ccps
+
+On the jumpserver the agent switches to the oracle login account before `ccps`:
+
+```text
+sudo su - oracle -c 'ccps'
+```
+
+Typing `sudo su - oracle` by itself opens a shell and waits for the keyboard, so the agent passes the command with `-c`. That is the same login shell (`su -`), and `ccps` runs only after the switch. Each `ssh` to a database server uses the same switch, because that is the account you are on after `su - oracle`. `sudo` must not ask for a password. Set `jumpserver.become` to `""` to skip the switch.
+
 ### ccps modes
 
-- `mode: once` (default): runs `ccps` once after connecting. It must exit with code 0.
-- `mode: per_command`: runs `ccps` in the same shell before every `ssh` to a target. Use this if
-  `ccps` only affects the current shell session, for example by starting an `ssh-agent`.
+- `mode: once` (default): runs `sudo su - oracle -c 'ccps'` once. It must exit with code 0. Later ssh commands are a new `sudo su - oracle -c 'ssh ...'`.
+- `mode: per_command`: runs `ccps` in the same oracle shell as the ssh: `sudo su - oracle -c 'ccps && ssh ...'`. Use this if `ccps` only affects the current shell, for example by starting an `ssh-agent`.
 
 `ccps` must not prompt for input. If it asks for a password or OTP, tell me how it prompts so that support can be added.
 

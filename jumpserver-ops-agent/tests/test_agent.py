@@ -95,6 +95,32 @@ def test_script_needs_exactly_one_source(make_config):
         make_config(body=bad)
 
 
+def test_sudo_su_oracle_runs_before_ccps_and_ssh(make_config):
+    import subprocess
+
+    cfg = make_config()
+    assert cfg.jumpserver.become == "sudo su - oracle"
+    runner = JumpServerRunner(cfg, FakeExecutor({}))
+    ccps = runner.wrap(cfg.ccps.command)
+    ssh = runner.build_command(cfg.servers["db01"], cfg.scripts["dba_checkout"])
+    for command in (ccps, ssh):
+        assert "sudo su - oracle -c" in command
+        subprocess.run(["bash", "-n", "-c", command], check=True)
+    assert ccps.index("sudo su - oracle") < ccps.index("ccps")
+    assert "ccps" not in ssh
+    assert ssh.index("sudo su - oracle") < ssh.index("dba_checkout.sh")
+
+    per = JumpServerRunner(make_config(mode="per_command"), FakeExecutor({}))
+    same_shell = per.build_command(cfg.servers["db01"], cfg.scripts["dba_checkout"])
+    assert same_shell.index("{ ccps;") < same_shell.index("ssh")
+    assert "sudo su - oracle -c" in same_shell
+
+    disabled = CONFIG.replace("  host: jump.local\n", "  host: jump.local\n  become: ''\n")
+    plain = JumpServerRunner(make_config(body=disabled), FakeExecutor({}))
+    bare = plain.wrap("ccps")
+    assert "sudo" not in bare and "su - oracle" not in bare
+
+
 def test_build_command_quotes_and_uses_users(make_config):
     cfg = make_config()
     runner = JumpServerRunner(cfg, FakeExecutor({}))
