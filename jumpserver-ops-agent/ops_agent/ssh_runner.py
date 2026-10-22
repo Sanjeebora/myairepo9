@@ -166,13 +166,23 @@ class JumpServerRunner:
             )
         return result
 
+    def script_args(self, server: ServerConfig, script: ScriptConfig) -> list[str]:
+        args = [
+            arg.replace("{hostname}", server.host).replace("{name}", server.name)
+            for arg in script.args
+        ]
+        if script.pass_hostname and server.host not in args:
+            args.append(server.host)
+        return args
+
     def build_command(self, server: ServerConfig, script: ScriptConfig) -> str:
         user = server.user or self.config.target_ssh.user
         destination = f"{user}@{server.host}" if user else server.host
+        args = self.script_args(server, script)
         if script.remote_path:
-            remote = shlex.join([script.remote_path, *script.args])
+            remote = shlex.join([script.remote_path, *args])
         else:
-            remote = shlex.join(["bash", "-s", "--", *script.args])
+            remote = shlex.join(["bash", "-s", "--", *args])
         command = shlex.join(["ssh", *self.config.target_ssh.options, destination, remote])
         if self.config.ccps.mode == "per_command":
             command = f"{{ {self.config.ccps.command}; }} 1>&2 && {command}"
