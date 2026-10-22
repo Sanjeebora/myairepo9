@@ -79,28 +79,45 @@ Typing `sudo su - oracle` by itself opens a shell and waits for the keyboard, so
 
 ### Scripts
 
+The script path is the same on every server. Put that path in `remote_path`:
+
+```yaml
+scripts:
+  showsid:
+    remote_path: /dba/bin/showsid
+  showusers:
+    remote_path: /dba/bin/showusers
+  dba_checkout:
+    remote_path: /dba/bin/dba_checkout
+  start_oracle:
+    remote_path: /dba/bin/start_oracle
+  maint_mode:
+    remote_path: /dba/bin/maint_mode.sh
+    args: ["-s"]
+```
+
 - `remote_path`: the script already exists on each target and is run as `ssh target /path/script args`.
 - `local_file`: the script is stored in this project and sent to each target over stdin (`bash -s`), so you do not need to copy it to the servers.
 
 ### Hostname
 
-Pass the hosts for this run with `--hostname` (or the Hostname box on the web page). Repeat the flag, or separate names with commas. Used on its own, only those hosts are contacted. A name that matches a configured server keeps that server's user. Any other name is used with `target_ssh.user`.
+`--hostname` (or the Hostname box) chooses which hosts this run contacts. Repeat the flag, or separate names with commas. Used on its own, only those hosts are contacted. A name that matches a configured server keeps that server's user. Any other name is used with `target_ssh.user`.
 
-To give the hostname to the script itself, set `pass_hostname: true` or put `{hostname}` in `args`:
+`--pass-hostname` (or the checkbox **Pass the hostname as an argument**) appends that host after the script and its fixed arguments:
 
-```yaml
-dba_checkout:
-  remote_path: /home/oracle/scripts/dba_checkout.sh
-  pass_hostname: true
+```text
+/dba/bin/dba_checkout proddb01.internal
+/dba/bin/maint_mode.sh -s proddb01.internal
 ```
 
-That runs `dba_checkout.sh proddb01.internal` on `proddb01.internal`.
+Leave the option off when the script does not expect a hostname. To always pass it for one script, set `pass_hostname: true` in the config, or put `{hostname}` where you want it inside `args`.
 
 ## Web UI
 
 `python -m ops_agent web` starts Flask on http://127.0.0.1:5000 and listens on this computer only. The page lists the scripts and servers from `config.yaml`. There is no box for a free-form command: the agent can run only the allowlisted scripts.
 
 - **Hostname** runs only the hosts you type. Leave it blank to use the ticked servers.
+- **Pass the hostname as an argument** appends each host to the script, after flags such as `-s`.
 - **Dry run** prints the `ccps` and `ssh` commands and does not connect.
 - **Skip the LLM** collects script output and skips the action plan.
 - Finished runs are listed under **Reports**, including the redacted raw logs.
@@ -113,8 +130,9 @@ python -m ops_agent run -s dba_checkout --dry-run            # show exact comman
 python -m ops_agent run -s dba_checkout                      # all servers
 python -m ops_agent run -s dba_checkout --tags prod
 python -m ops_agent run -s dba_checkout --hostname proddb01.internal
-python -m ops_agent run -s dba_checkout --hostname proddb01.internal,proddb02.internal
-python -m ops_agent run -s dba_checkout -s os_checkout --servers proddb01,proddb02
+python -m ops_agent run -s dba_checkout --hostname proddb01.internal --pass-hostname
+python -m ops_agent run -s maint_mode --hostname proddb01.internal --pass-hostname --dry-run
+python -m ops_agent run -s showsid -s showusers --servers proddb01,proddb02
 python -m ops_agent run -s dba_checkout --no-llm             # collect output only
 python -m ops_agent web                                      # browser UI
 ```
