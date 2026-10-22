@@ -14,6 +14,16 @@ def _csv(value: str) -> list[str]:
     return [v.strip() for v in value.split(",") if v.strip()]
 
 
+def _hostnames(values: list[str] | None) -> list[str] | None:
+    if not values:
+        return None
+    hosts: list[str] = []
+    for value in values:
+        hosts.extend(part for part in value.replace("\n", ",").split(",") if part.strip())
+    cleaned = [host.strip() for host in hosts if host.strip()]
+    return cleaned or None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ops_agent",
@@ -28,8 +38,11 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="Connect, run ccps, run scripts, analyze with the LLM")
     run.add_argument("-s", "--script", action="append", required=True,
                      help="Allowlisted script name (repeatable), e.g. dba_checkout")
-    run.add_argument("--servers", type=_csv, help="Comma-separated server names (default: all)")
+    run.add_argument("--servers", type=_csv, help="Comma-separated server names from the config (default: all)")
     run.add_argument("--tags", type=_csv, help="Comma-separated tags to select servers")
+    run.add_argument("-H", "--hostname", action="append",
+                     help="Target hostname for this run. Repeat the flag, or separate names with commas. "
+                          "When used alone, only these hosts are contacted.")
     run.add_argument("--no-llm", action="store_true", help="Only collect output, skip the LLM")
     run.add_argument("--dry-run", action="store_true",
                      help="Print the commands that would run on the jumpserver and exit")
@@ -57,7 +70,7 @@ def cmd_list(cfg) -> int:
 
 
 def cmd_run(cfg, args) -> int:
-    outcome = execute_run(cfg, args.script, args.servers, args.tags,
+    outcome = execute_run(cfg, args.script, args.servers, args.tags, _hostnames(args.hostname),
                           dry_run=args.dry_run, no_llm=args.no_llm)
     if outcome.dry_run:
         print("\n".join(outcome.commands))
