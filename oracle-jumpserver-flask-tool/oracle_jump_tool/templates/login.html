@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Oracle jump-server tool</title>
+<style>
+  :root { --bg:#0f172a; --card:#111c33; --fg:#e2e8f0; --muted:#94a3b8; --accent:#38bdf8; --ok:#22c55e; --bad:#f87171; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui, Segoe UI, sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width:720px; margin:40px auto; padding:0 16px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  p.sub { color:var(--muted); margin:0 0 24px; }
+  .card { background:var(--card); border:1px solid #1e2b4a; border-radius:12px; padding:20px; margin-bottom:16px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:12px 0 4px; }
+  input { width:100%; padding:10px 12px; border-radius:8px; border:1px solid #2a3a5e; background:#0b1428; color:var(--fg); font-size:15px; }
+  input:focus { outline:2px solid var(--accent); border-color:transparent; }
+  button { margin-top:16px; padding:10px 18px; border:0; border-radius:8px; background:var(--accent); color:#04263a; font-weight:600; cursor:pointer; }
+  button.secondary { background:#334155; color:var(--fg); }
+  .row { display:flex; gap:12px; } .row > div { flex:1; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600; }
+  .pill.ok { background:#14532d; color:#bbf7d0; } .pill.off { background:#3f1d1d; color:#fecaca; }
+  .err { color:var(--bad); }
+  code, pre { font-family: ui-monospace, Consolas, monospace; font-size:13px; }
+  pre { background:#0b1428; padding:12px; border-radius:8px; overflow:auto; white-space:pre-wrap; word-break:break-all; }
+  ul { padding-left:18px; margin:6px 0 0; } li { color:var(--muted); } li code { color:var(--fg); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Oracle jump-server tool</h1>
+  <p class="sub">Local API for your LLM agent. Listening on http://{{ settings.bind_host }}:{{ settings.bind_port }}</p>
+
+  {% if result and result.error %}
+  <div class="card"><strong class="err">Login failed:</strong> {{ result.error }}
+    {% if result.transcript %}<pre>{{ result.transcript }}</pre>{% endif %}
+  </div>
+  {% endif %}
+  {% if result and result.logged_out %}<div class="card">Logged out. The SSH session is closed.</div>{% endif %}
+
+  {% if session %}
+  <div class="card">
+    <span class="pill ok">Connected</span>
+    <p>Logged in as <code>{{ session.username }}@{{ session.jump_host }}</code>; ccps done, ready to run scripts.</p>
+    {% if result and result.token %}
+    <label>Session token (valid until logout or timeout)</label>
+    <pre>{{ result.token }}</pre>
+    <label>API key for the agent (valid while this tool runs)</label>
+    <pre>{{ result.api_key }}</pre>
+    <form method="post" action="/logout">
+      <input type="hidden" name="api_key" value="{{ result.token }}">
+      <button class="secondary" type="submit">Log out</button>
+    </form>
+    {% else %}
+    <p class="sub">The token was shown right after login. To log out, call <code>POST /logout</code> or log in again.</p>
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="card">
+    <span class="pill off">Not logged in</span>
+    <form method="post" action="/login" autocomplete="off">
+      <div class="row">
+        <div>
+          <label for="jump_host">Jump server</label>
+          <input id="jump_host" name="jump_host" value="{{ settings.jump_host }}" placeholder="jump.example.com" required>
+        </div>
+        <div style="flex:0 0 110px">
+          <label for="jump_port">Port</label>
+          <input id="jump_port" name="jump_port" value="{{ settings.jump_port }}" inputmode="numeric">
+        </div>
+      </div>
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" required autofocus>
+      <label for="password">Password (also used if sudo asks)</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit">Log in, become oracle and run ccps</button>
+    </form>
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <strong>Allowlisted scripts</strong>
+    <ul>{% for s in scripts %}<li><code>{{ s.name }}</code>: {{ s.command }}</li>{% endfor %}</ul>
+  </div>
+</main>
+</body>
+</html>

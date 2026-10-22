@@ -1,0 +1,188 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Oracle jump-server tool",
+    "version": "0.1.0",
+    "description": "Local HTTP tool that runs allowlisted Oracle DBA scripts on database hosts through a jump server. A person logs in first (console prompt, web page, or POST /login); the agent then calls /run with the API key."
+  },
+  "servers": [{ "url": "http://127.0.0.1:5055" }],
+  "components": {
+    "securitySchemes": {
+      "bearer": { "type": "http", "scheme": "bearer", "description": "API key printed at startup (or JT_API_KEY), or the session token from /login." },
+      "apiKeyHeader": { "type": "apiKey", "in": "header", "name": "X-API-Key" }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": ["error", "message"],
+        "properties": {
+          "error": { "type": "string", "example": "not_logged_in" },
+          "message": { "type": "string" },
+          "stage": { "type": "string", "description": "login only: ssh, connect, host_key, input, or the shell step that failed" },
+          "transcript": { "type": "string", "description": "login only: redacted tail of the jump-server output" }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "username": { "type": "string" },
+          "jump_host": { "type": "string" },
+          "created_at": { "type": "string" },
+          "last_used": { "type": "string" },
+          "idle_expires_at": { "type": "string" },
+          "expires_at": { "type": "string" },
+          "busy": { "type": "boolean" },
+          "steps": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "Script": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "example": "showsid" },
+          "command": { "type": "string", "example": "/dba/bin/showsid" },
+          "description": { "type": "string" },
+          "timeout_s": { "type": "integer", "nullable": true }
+        }
+      },
+      "RunRequest": {
+        "type": "object",
+        "required": ["script"],
+        "properties": {
+          "script": {
+            "type": "string",
+            "enum": ["showsid", "showusers", "dba_checkout", "start_oracle", "maint_mode"],
+            "description": "Allowlisted script name. The exact command (e.g. '/dba/bin/maint_mode.sh -s') is also accepted."
+          },
+          "host": { "type": "string", "description": "One database hostname or IP.", "example": "proddb01.example.com" },
+          "hosts": {
+            "type": "array",
+            "items": { "type": "string" },
+            "maxItems": 20,
+            "description": "Several hosts; run one after another. Combined with host if both are given."
+          },
+          "timeout_s": { "type": "integer", "minimum": 5, "maximum": 3600, "description": "Per-host timeout. Default 900 (1800 for dba_checkout and start_oracle)." }
+        }
+      },
+      "RunResult": {
+        "type": "object",
+        "properties": {
+          "host": { "type": "string" },
+          "script": { "type": "string" },
+          "command": { "type": "string", "description": "Command run as oracle on the jump server." },
+          "status": { "type": "string", "enum": ["ok", "failed", "connection_error", "timeout", "error"] },
+          "exit_code": { "type": "integer", "nullable": true, "description": "Exit code of ssh (the remote script's code; 255 = ssh could not connect)." },
+          "stdout": { "type": "string" },
+          "stderr": { "type": "string" },
+          "duration_s": { "type": "number" },
+          "started_at": { "type": "string" },
+          "truncated": { "type": "boolean" },
+          "error": { "type": "string", "nullable": true }
+        }
+      },
+      "RunResponse": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean", "description": "true when every host returned status ok" },
+          "script": { "type": "string" },
+          "command": { "type": "string" },
+          "results": { "type": "array", "items": { "$ref": "#/components/schemas/RunResult" } },
+          "session_closed": { "type": "boolean", "description": "true if the shell broke and the user must log in again" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Liveness and login state",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": { "application/json": { "schema": { "type": "object", "properties": {
+              "status": { "type": "string", "example": "ok" },
+              "version": { "type": "string" },
+              "logged_in": { "type": "boolean" },
+              "jump_host": { "type": "string", "nullable": true }
+            } } } }
+          }
+        }
+      }
+    },
+    "/login": {
+      "post": {
+        "summary": "SSH to the jump server, become oracle, run ccps",
+        "description": "Meant for the person, not the agent. Accepts JSON or an HTML form. Replaces any existing session. Can take up to a minute.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "type": "object", "required": ["username", "password"], "properties": {
+              "username": { "type": "string" },
+              "password": { "type": "string", "format": "password", "description": "Also sent if sudo asks for a password." },
+              "jump_host": { "type": "string", "description": "Defaults to JT_JUMP_HOST." },
+              "jump_port": { "type": "integer", "default": 22 }
+            } } }
+          }
+        },
+        "responses": {
+          "200": { "description": "Logged in", "content": { "application/json": { "schema": { "type": "object", "properties": {
+            "token": { "type": "string" },
+            "token_type": { "type": "string", "example": "Bearer" },
+            "session": { "$ref": "#/components/schemas/Session" }
+          } } } } },
+          "400": { "description": "Bad input", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "401": { "description": "Jump server or sudo rejected the password", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "409": { "description": "Another login is in progress", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "502": { "description": "Connection, host key, sudo or ccps step failed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/logout": {
+      "post": {
+        "summary": "Close the SSH session",
+        "security": [{ "bearer": [] }, { "apiKeyHeader": [] }],
+        "responses": {
+          "200": { "description": "Done", "content": { "application/json": { "schema": { "type": "object", "properties": { "logged_out": { "type": "boolean" } } } } } },
+          "401": { "description": "Missing or wrong key", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/session": {
+      "get": {
+        "summary": "Current session details",
+        "security": [{ "bearer": [] }, { "apiKeyHeader": [] }],
+        "responses": {
+          "200": { "description": "Logged in", "content": { "application/json": { "schema": { "type": "object", "properties": {
+            "logged_in": { "type": "boolean" }, "session": { "$ref": "#/components/schemas/Session" } } } } } },
+          "401": { "description": "Missing or wrong key", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "409": { "description": "Not logged in", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/scripts": {
+      "get": {
+        "summary": "List allowlisted scripts",
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "object", "properties": {
+            "scripts": { "type": "array", "items": { "$ref": "#/components/schemas/Script" } } } } } } }
+        }
+      }
+    },
+    "/run": {
+      "post": {
+        "summary": "Run one allowlisted script on one or more hosts",
+        "description": "Runs `ssh <host> <script>` as oracle from the jump server. Hosts run one after another on the same shell.",
+        "security": [{ "bearer": [] }, { "apiKeyHeader": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunRequest" } } } },
+        "responses": {
+          "200": { "description": "Ran (check ok and each result's status)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunResponse" } } } },
+          "400": { "description": "Unknown script, bad hostname, too many hosts", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "401": { "description": "Missing or wrong key", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "409": { "description": "Not logged in; ask the user to log in", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "503": { "description": "Another run is in progress (Retry-After header)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/openapi.json": { "get": { "summary": "This document", "responses": { "200": { "description": "OK" } } } },
+    "/tool-schema.json": { "get": { "summary": "OpenAI-style tool definitions", "responses": { "200": { "description": "OK" } } } }
+  }
+}

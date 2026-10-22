@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Fake ccps: asks for a passphrase like ssh-add, then enables "passwordless ssh" via a state file.
+echo "Setting up passwordless ssh to DB servers..."
+if [ "${FAKE_CCPS_MODE:-prompt}" = noprompt ]; then
+  touch "$FAKE_STATE/ccps_ok"
+  echo "Keys already loaded."
+  exit 0
+fi
+__tty=$(stty -g 2>/dev/null); stty -echo 2>/dev/null
+printf 'Enter passphrase for /home/oracle/.ssh/id_rsa: '
+IFS= read -r pw
+stty "$__tty" 2>/dev/null
+echo
+if [ "$pw" != "$FAKE_CCPS_PASSWORD" ]; then
+  __tty=$(stty -g 2>/dev/null); stty -echo 2>/dev/null
+  printf 'Bad passphrase, try again for /home/oracle/.ssh/id_rsa: '
+  IFS= read -r pw
+  stty "$__tty" 2>/dev/null
+  echo
+  exit 1
+fi
+touch "$FAKE_STATE/ccps_ok"
+echo "Identity added: /home/oracle/.ssh/id_rsa (oracle@jump)"
+exit "${FAKE_CCPS_EXIT:-0}"

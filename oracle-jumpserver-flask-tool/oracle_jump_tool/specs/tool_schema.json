@@ -1,0 +1,50 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "run_oracle_script",
+      "description": "Run one predefined Oracle DBA script on one or more database hosts through the jump server, as the oracle user. Only these scripts exist: showsid (/dba/bin/showsid: list SIDs and status), showusers (/dba/bin/showusers: users and sessions), dba_checkout (/dba/bin/dba_checkout: health checkout), start_oracle (/dba/bin/start_oracle: STARTS Oracle; confirm with the user first), maint_mode (/dba/bin/maint_mode.sh -s: maintenance-mode status). Returns stdout, stderr, exit_code, status and duration per host. If the error is not_logged_in, ask the user to log in to the tool; never ask for their password.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "script": {
+            "type": "string",
+            "enum": ["showsid", "showusers", "dba_checkout", "start_oracle", "maint_mode"],
+            "description": "Which allowlisted script to run."
+          },
+          "hosts": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1,
+            "maxItems": 20,
+            "description": "Database server hostnames or IPs, e.g. [\"proddb01.example.com\"]."
+          },
+          "timeout_s": {
+            "type": "integer",
+            "minimum": 5,
+            "maximum": 3600,
+            "description": "Optional per-host timeout in seconds."
+          }
+        },
+        "required": ["script", "hosts"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_oracle_scripts",
+      "description": "List the allowlisted scripts the Oracle jump-server tool can run.",
+      "parameters": { "type": "object", "properties": {}, "additionalProperties": false }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_jump_session_status",
+      "description": "Check whether the user is logged in to the jump server through the tool, and when the session expires.",
+      "parameters": { "type": "object", "properties": {}, "additionalProperties": false }
+    }
+  }
+]
