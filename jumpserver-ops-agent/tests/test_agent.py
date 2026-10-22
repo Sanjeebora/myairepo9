@@ -121,6 +121,24 @@ def test_sudo_su_oracle_runs_before_ccps_and_ssh(make_config):
     assert "sudo" not in bare and "su - oracle" not in bare
 
 
+def test_hostname_option_targets_that_host_and_can_be_passed_to_the_script(make_config):
+    cfg = make_config()
+    targets = cfg.resolve_targets(None, None, ["spare.example.com"])
+    assert [server.host for server in targets] == ["spare.example.com"]
+    assert [server.name for server in cfg.resolve_targets(None, None, ["db02.internal"])] == ["db02"]
+
+    with pytest.raises(ConfigError, match="Invalid hostname"):
+        cfg.resolve_targets(None, None, ["db01.internal;id"])
+
+    cfg.scripts["dba_checkout"].args = ["{hostname}"]
+    cfg.scripts["dba_checkout"].pass_hostname = True
+    runner = JumpServerRunner(cfg, FakeExecutor({}))
+    command = runner.build_command(cfg.servers["db01"], cfg.scripts["dba_checkout"])
+    assert "oracle@db01.internal" in command
+    assert command.count("db01.internal") == 2
+    assert "db02" not in command
+
+
 def test_build_command_quotes_and_uses_users(make_config):
     cfg = make_config()
     runner = JumpServerRunner(cfg, FakeExecutor({}))

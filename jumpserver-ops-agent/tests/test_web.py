@@ -179,6 +179,32 @@ def test_api_reports_running_then_done(app, client):
     assert payload["dry_run"] is True
 
 
+def test_hostname_field_limits_the_run_to_that_host(app, client):
+    response = client.post("/runs", data={
+        "script": "dba_checkout", "hostname": "spare.example.com, db02.internal", "dry_run": "1",
+    })
+    job_id = response.location.rstrip("/").split("/")[-1]
+    job = _wait(app, job_id)
+    text = "\n".join(job.outcome.commands)
+    assert "oracle@spare.example.com" in text
+    assert "oracle@db02.internal" in text
+    assert "db01.internal" not in text
+    page = client.get("/")
+    assert b'name="hostname"' in page.data
+
+    rejected = client.post("/runs", data={"script": "dba_checkout", "hostname": "bad host"})
+    assert rejected.status_code == 400
+    assert b"Invalid hostname" in rejected.data
+
+
+def test_cli_accepts_hostname(config_path, capsys):
+    assert main(["-c", str(config_path), "run", "-s", "dba_checkout",
+                 "--hostname", "spare.example.com", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "oracle@spare.example.com" in out
+    assert "db01" not in out
+
+
 def test_cli_dry_run_still_prints_commands(config_path, capsys):
     assert main(["-c", str(config_path), "run", "-s", "dba_checkout", "--servers", "db02", "--dry-run"]) == 0
     out = capsys.readouterr().out
