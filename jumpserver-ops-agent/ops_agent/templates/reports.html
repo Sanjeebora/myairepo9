@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Reports{% endblock %}
+{% block body %}
+  <h2>Saved reports</h2>
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+  {% if reports %}
+    <table>
+      <tr><th>When</th><th>Status</th><th>Summary</th></tr>
+      {% for report in reports %}
+        <tr>
+          <td><a href="{{ url_for('show_report', report_id=report.id) }}">{{ report.id }}</a></td>
+          <td>{{ (report.plan or {}).get("overall_status", "no LLM") }}</td>
+          <td>{{ (report.plan or {}).get("summary", "") }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No reports yet.</p>
+  {% endif %}
+{% endblock %}

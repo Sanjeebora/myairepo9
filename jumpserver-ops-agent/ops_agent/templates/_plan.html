@@ -1,0 +1,45 @@
+{% if plan %}
+  <p>Overall status: <span class="pill status-{{ (plan.overall_status or '') | lower }}">{{ plan.overall_status or "UNKNOWN" }}</span></p>
+  <p>{{ plan.summary }}</p>
+
+  <h2>Action plan</h2>
+  {% for action in plan.action_plan or [] %}
+    <div class="card">
+      <h3>{{ action.priority }}. {{ action.title }}</h3>
+      <p>Servers: {{ (action.servers or []) | join(", ") or "-" }} · Owner: {{ action.owner or "-" }} · Risk: {{ action.risk or "-" }}</p>
+      <p>{{ action.reason }}</p>
+      {% if action.steps %}
+        <ol>
+          {% for step in action.steps %}<li>{{ step }}</li>{% endfor %}
+        </ol>
+      {% endif %}
+      {% if action.suggested_commands %}
+        <p class="muted">Suggested commands, for a person to review. The agent does not run these.</p>
+        <pre>{{ action.suggested_commands | join("\n") }}</pre>
+      {% endif %}
+    </div>
+  {% else %}
+    <p>No actions returned.</p>
+  {% endfor %}
+
+  <h2>Findings</h2>
+  {% for server in plan.servers or [] %}
+    <h3>{{ server.name }} — {{ server.status }}</h3>
+    <table>
+      <tr><th>Severity</th><th>Finding</th><th>Evidence</th><th>Impact</th></tr>
+      {% for finding in server.findings or [] %}
+        <tr>
+          <td>{{ finding.severity }}</td>
+          <td>{{ finding.title }}</td>
+          <td><code>{{ finding.evidence }}</code></td>
+          <td>{{ finding.impact }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% endfor %}
+
+  {% if plan.needs_human_review %}
+    <h2>Needs a person to check</h2>
+    <ul>{% for item in plan.needs_human_review %}<li>{{ item }}</li>{% endfor %}</ul>
+  {% endif %}
+{% endif %}
