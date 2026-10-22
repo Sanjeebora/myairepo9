@@ -41,17 +41,29 @@ servers:
     user: dbadmin
     tags: [uat]
 
-# Allowlist. The agent can only run the scripts listed here.
+# Allowlist. The same path is used on every server. The agent can only run scripts listed here.
+# --pass-hostname (or the web checkbox) appends the target hostname after these args.
 scripts:
+  showsid:
+    description: Show the Oracle SID
+    remote_path: /dba/bin/showsid
+    timeout: 120
+  showusers:
+    description: Show database users
+    remote_path: /dba/bin/showusers
+    timeout: 120
   dba_checkout:
     description: Daily DBA health checkout
-    remote_path: /home/oracle/scripts/dba_checkout.sh   # script that already exists on each target
-    args: []                      # use ["{hostname}"] to put the target hostname in the argument list
-    pass_hostname: false          # true appends the hostname when it is not already in args
+    remote_path: /dba/bin/dba_checkout
     timeout: 600
-  os_checkout:
-    description: OS checks (sent from this machine and run with `bash -s`)
-    local_file: scripts/os_checkout.sh
+  start_oracle:
+    description: Start Oracle
+    remote_path: /dba/bin/start_oracle
+    timeout: 600
+  maint_mode:
+    description: Maintenance mode
+    remote_path: /dba/bin/maint_mode.sh
+    args: ["-s"]                  # fixed flags stay in front of the hostname
     timeout: 300
 
 llm:
