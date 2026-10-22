@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Fake `ssh [opts] -- host command`, run from the jump server as oracle.
+echo "$*" >> "$FAKE_STATE/ssh.log"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --) shift; break ;;
+    -o|-p|-i|-l) shift 2 ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+host=$1; shift
+cmd="$*"
+if [ "$FAKE_USER" != oracle ] || [ ! -f "$FAKE_STATE/ccps_ok" ]; then
+  echo "$host: Permission denied (publickey)." >&2
+  exit 255
+fi
+case "$host" in
+  unreachable*) echo "ssh: Could not resolve hostname $host: Name or service not known" >&2; exit 255 ;;
+esac
+case "$cmd" in
+  /dba/bin/showsid) printf 'SID      STATUS   HOST\nORCL1    OPEN     %s\nORCL2    MOUNTED  %s\n' "$host" "$host" ;;
+  /dba/bin/showusers) echo "SYS"; echo "SYSTEM"; echo "APPUSER (3 sessions)" ;;
+  /dba/bin/dba_checkout)
+    echo "Checkout on $host"
+    echo "WARN: tablespace USERS 91% full" >&2
+    exit 3 ;;
+  "/dba/bin/maint_mode.sh -s") echo "maintenance mode: OFF" ;;
+  /dba/bin/start_oracle)
+    sleep "${FAKE_SLEEP:-0}"
+    echo "started" ;;
+  *) echo "unexpected command: $cmd" >&2; exit 127 ;;
+esac

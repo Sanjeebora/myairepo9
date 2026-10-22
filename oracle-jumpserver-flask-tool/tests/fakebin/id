@@ -1,0 +1,6 @@
+#!/bin/sh
+if [ "$1" = "-un" ]; then
+  echo "${FAKE_USER:-jumpuser}"
+else
+  exec /usr/bin/id "$@"
+fi

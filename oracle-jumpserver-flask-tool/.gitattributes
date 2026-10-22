@@ -1,0 +1,2 @@
+*.bat text eol=crlf
+tests/fakebin/* text eol=lf

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Fake `sudo su - oracle`: optional password prompt, then an interactive "oracle" shell.
+sleep "${FAKE_SUDO_DELAY:-0}"
+if [ -n "$FAKE_SUDO_PASSWORD" ]; then
+  __tty=$(stty -g 2>/dev/null); stty -echo 2>/dev/null
+  printf '[sudo] password for %s: ' "$(id -un)"
+  IFS= read -r pw
+  stty "$__tty" 2>/dev/null
+  echo
+  if [ "$pw" != "$FAKE_SUDO_PASSWORD" ]; then
+    echo "Sorry, try again."
+    __tty=$(stty -g 2>/dev/null); stty -echo 2>/dev/null
+    printf '[sudo] password for %s: ' "$(id -un)"
+    IFS= read -r pw
+    stty "$__tty" 2>/dev/null
+    echo
+    echo "sudo: 1 incorrect password attempt"
+    exit 1
+  fi
+fi
+if [ "$FAKE_SUDO_DENY" = 1 ]; then
+  echo "jumpuser is not in the sudoers file.  This incident will be reported."
+  exit 1
+fi
+export FAKE_USER=oracle
+export PS1='oracle@jump:~> '
+echo "Last login: Thu Oct 22 09:00:00 UTC 2026"
+exec bash --norc --noprofile -i
