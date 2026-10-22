@@ -121,6 +121,22 @@ def test_sudo_su_oracle_runs_before_ccps_and_ssh(make_config):
     assert "sudo" not in bare and "su - oracle" not in bare
 
 
+def test_pass_hostname_appends_host_after_fixed_args(make_config):
+    cfg = make_config()
+    script = cfg.scripts["dba_checkout"]
+    script.remote_path = "/dba/bin/maint_mode.sh"
+    script.args = ["-s"]
+    runner = JumpServerRunner(cfg, FakeExecutor({}))
+
+    plain = runner.build_command(cfg.servers["db01"], script)
+    assert "/dba/bin/maint_mode.sh -s" in plain
+    assert plain.count("db01.internal") == 1
+
+    with_host = runner.build_command(cfg.servers["db01"], script, pass_hostname=True)
+    assert "/dba/bin/maint_mode.sh -s db01.internal" in with_host
+    assert with_host.count("db01.internal") == 2
+
+
 def test_hostname_option_targets_that_host_and_can_be_passed_to_the_script(make_config):
     cfg = make_config()
     targets = cfg.resolve_targets(None, None, ["spare.example.com"])
