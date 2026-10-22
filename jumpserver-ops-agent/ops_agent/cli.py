@@ -7,10 +7,7 @@ import sys
 from dotenv import load_dotenv
 
 from .config import ConfigError, load_config
-from .llm import OpenAIChatModel, analyze
-from .redact import Redactor
-from .report import write_report
-from .ssh_runner import JumpServerRunner, ParamikoExecutor
+from .runner import execute_run
 
 
 def _csv(value: str) -> list[str]:
@@ -36,6 +33,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--no-llm", action="store_true", help="Only collect output, skip the LLM")
     run.add_argument("--dry-run", action="store_true",
                      help="Print the commands that would run on the jumpserver and exit")
+
+    web = sub.add_parser("web", help="Open the browser UI (Flask) on this PC")
+    web.add_argument("--host", default="127.0.0.1", help="Bind address (default: this PC only)")
+    web.add_argument("--port", type=int, default=5000)
     return parser
 
 
@@ -55,42 +56,19 @@ def cmd_list(cfg) -> int:
 
 
 def cmd_run(cfg, args) -> int:
-    scripts = [cfg.get_script(name) for name in args.script]
-    servers = cfg.select_servers(args.servers, args.tags)
-    redactor = Redactor(cfg.redact_patterns)
-
-    if args.dry_run:
-        runner = JumpServerRunner(cfg, executor=None)  # type: ignore[arg-type]
-        if cfg.ccps.mode == "once":
-            print(f"[jumpserver] {runner.wrap(cfg.ccps.command)}")
-        for server in servers:
-            for script in scripts:
-                print(f"[{server.name}] {runner.build_command(server, script)}")
+    outcome = execute_run(cfg, args.script, args.servers, args.tags,
+                          dry_run=args.dry_run, no_llm=args.no_llm)
+    if outcome.dry_run:
+        print("\n".join(outcome.commands))
         return 0
-
-    model = None if args.no_llm else OpenAIChatModel(cfg.llm)
-
-    with ParamikoExecutor(cfg) as executor:
-        runner = JumpServerRunner(cfg, executor)
-        if cfg.ccps.mode == "once":
-            runner.run_ccps()
-        results = runner.run_many(servers, scripts)
-
-    plan = None
-    if model is not None:
-        logging.info("Sending results to %s for analysis", cfg.llm.model)
-        plan = analyze(results, model, cfg.llm, redactor)
-
-    out_dir = write_report(cfg.reports_dir, plan, results, redactor)
-
     print()
-    for r in results:
-        print(f"  {r.server:<20} {r.script:<20} {r.status} (exit {r.exit_code})")
-    if plan:
-        print(f"\nOverall status: {plan.get('overall_status')}\n{plan.get('summary', '')}")
-        print(f"\nAction plan: {out_dir / 'report.md'}")
-    print(f"Raw output:  {out_dir / 'raw'}")
-    return 0 if all(r.status == "ok" for r in results) else 2
+    for result in outcome.results:
+        print(f"  {result.server:<20} {result.script:<20} {result.status} (exit {result.exit_code})")
+    if outcome.plan:
+        print(f"\nOverall status: {outcome.plan.get('overall_status')}\n{outcome.plan.get('summary', '')}")
+        print(f"\nAction plan: {outcome.report_dir / 'report.md'}")
+    print(f"Raw output:  {outcome.report_dir / 'raw'}")
+    return outcome.exit_code
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -104,6 +82,10 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLogger("paramiko").setLevel(logging.WARNING)
         logging.getLogger("httpx").setLevel(logging.WARNING)
     try:
+        if args.command == "web":
+            from .web import serve
+            serve(args.config, args.host, args.port)
+            return 0
         cfg = load_config(args.config)
         if args.command == "list":
             return cmd_list(cfg)
