@@ -142,13 +142,22 @@ class JumpServerRunner:
         self.executor = executor
 
     def wrap(self, command: str) -> str:
+        become = (self.config.jumpserver.become or "").strip()
+        if become:
+            # `sudo su - oracle` alone opens an interactive shell and waits. `-c` runs the
+            # command in that same oracle login shell, which is the non-interactive form.
+            command = f"{become} -c {shlex.quote(command)}"
         if self.config.jumpserver.login_shell:
             return f"bash -lc {shlex.quote(command)}"
         return command
 
     def run_ccps(self) -> ExecResult:
         ccps = self.config.ccps
-        log.info("Running '%s' on jumpserver", ccps.command)
+        become = (self.config.jumpserver.become or "").strip()
+        if become:
+            log.info("Running '%s' after '%s'", ccps.command, become)
+        else:
+            log.info("Running '%s' on jumpserver", ccps.command)
         result = self.executor.exec(self.wrap(ccps.command), timeout=ccps.timeout)
         if result.exit_code != 0:
             raise RuntimeError(
@@ -157,20 +166,34 @@ class JumpServerRunner:
             )
         return result
 
-    def build_command(self, server: ServerConfig, script: ScriptConfig) -> str:
+    def script_args(self, server: ServerConfig, script: ScriptConfig,
+                    pass_hostname: bool = False) -> list[str]:
+        args = [
+            arg.replace("{hostname}", server.host).replace("{name}", server.name)
+            for arg in script.args
+        ]
+        # Config pass_hostname always applies. The run option adds it for this run only.
+        if (script.pass_hostname or pass_hostname) and server.host not in args:
+            args.append(server.host)
+        return args
+
+    def build_command(self, server: ServerConfig, script: ScriptConfig,
+                      pass_hostname: bool = False) -> str:
         user = server.user or self.config.target_ssh.user
         destination = f"{user}@{server.host}" if user else server.host
+        args = self.script_args(server, script, pass_hostname=pass_hostname)
         if script.remote_path:
-            remote = shlex.join([script.remote_path, *script.args])
+            remote = shlex.join([script.remote_path, *args])
         else:
-            remote = shlex.join(["bash", "-s", "--", *script.args])
+            remote = shlex.join(["bash", "-s", "--", *args])
         command = shlex.join(["ssh", *self.config.target_ssh.options, destination, remote])
         if self.config.ccps.mode == "per_command":
             command = f"{{ {self.config.ccps.command}; }} 1>&2 && {command}"
         return self.wrap(command)
 
-    def run_script(self, server: ServerConfig, script: ScriptConfig) -> ScriptResult:
-        command = self.build_command(server, script)
+    def run_script(self, server: ServerConfig, script: ScriptConfig,
+                   pass_hostname: bool = False) -> ScriptResult:
+        command = self.build_command(server, script, pass_hostname=pass_hostname)
         stdin = Path(script.local_file).read_bytes() if script.local_file else None
         started = time.monotonic()
         log.info("[%s] running %s", server.name, script.name)
@@ -193,8 +216,10 @@ class JumpServerRunner:
         return ScriptResult(server.name, server.host, script.name, status, res.exit_code,
                             res.stdout, res.stderr, time.monotonic() - started, command)
 
-    def run_many(self, servers: list[ServerConfig], scripts: list[ScriptConfig]) -> list[ScriptResult]:
+    def run_many(self, servers: list[ServerConfig], scripts: list[ScriptConfig],
+                 pass_hostname: bool = False) -> list[ScriptResult]:
         jobs = [(srv, scr) for srv in servers for scr in scripts]
         workers = max(1, min(self.config.max_parallel, len(jobs)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            return list(pool.map(lambda job: self.run_script(*job), jobs))
+            return list(pool.map(
+                lambda job: self.run_script(*job, pass_hostname=pass_hostname), jobs))

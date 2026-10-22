@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Run {{ job.id }}{% endblock %}
+{% block body %}
+  <h2>Run {{ job.id }}</h2>
+  <p>Status: <strong class="status-{{ job.status }}">{{ job.status }}</strong></p>
+
+  {% if job.status == "running" %}
+    <p class="muted">Working. This page refreshes when the run finishes.</p>
+    <script>
+      async function poll() {
+        const response = await fetch("{{ url_for('run_status', job_id=job.id) }}");
+        const data = await response.json();
+        if (data.status === "running") {
+          setTimeout(poll, 1000);
+          return;
+        }
+        location.reload();
+      }
+      poll();
+    </script>
+  {% elif job.status == "error" %}
+    <p class="error">{{ job.error }}</p>
+  {% elif job.outcome %}
+    {% if job.outcome.dry_run %}
+      <p>Dry run. Nothing was connected and no script was executed.</p>
+    {% endif %}
+    <h2>Commands on the jumpserver</h2>
+    <pre>{{ job.outcome.commands | join("\n") }}</pre>
+
+    {% if job.outcome.results %}
+      <h2>Script results</h2>
+      <table>
+        <tr><th>Server</th><th>Script</th><th>Status</th><th>Exit</th><th>Seconds</th></tr>
+        {% for result in job.outcome.results %}
+          <tr>
+            <td>{{ result.server }}</td>
+            <td>{{ result.script }}</td>
+            <td class="status-{{ result.status }}">{{ result.status }}</td>
+            <td>{{ result.exit_code }}</td>
+            <td>{{ "%.1f"|format(result.duration_s) }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+      {% for result in job.outcome.results %}
+        <details>
+          <summary>{{ result.server }} · {{ result.script }} output</summary>
+          {% if result.error %}<p class="error">{{ result.error }}</p>{% endif %}
+          <pre>{{ result.stdout or "(no stdout)" }}{% if result.stderr %}
+
+--- stderr ---
+{{ result.stderr }}{% endif %}</pre>
+        </details>
+      {% endfor %}
+    {% endif %}
+
+    {% with plan=job.outcome.plan %}
+      {% include "_plan.html" %}
+    {% endwith %}
+
+    {% if job.outcome.report_dir %}
+      <p><a href="{{ url_for('reports') }}">Saved reports</a></p>
+    {% endif %}
+  {% endif %}
+{% endblock %}

@@ -10,6 +10,7 @@ import yaml
 
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_HOSTNAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252}[A-Za-z0-9])?$")
 
 
 class ConfigError(ValueError):
@@ -28,6 +29,9 @@ class JumpServerConfig:
     auto_add_host_key: bool = False
     connect_timeout: int = 15
     login_shell: bool = True
+    # Switch to this login account before ccps. Empty string skips the switch.
+    # The agent runs it as `sudo su - oracle -c '<command>'` so it does not wait for a keyboard.
+    become: str | None = "sudo su - oracle"
 
     @property
     def password(self) -> str | None:
@@ -70,6 +74,8 @@ class ScriptConfig:
     remote_path: str | None = None
     local_file: str | None = None
     args: list[str] = field(default_factory=list)
+    # Append the target hostname as the last argument, or use {hostname} inside args.
+    pass_hostname: bool = False
     timeout: int = 600
 
 
@@ -117,6 +123,37 @@ class AppConfig:
                     selected[server.name] = server
         if not selected:
             raise ConfigError("No servers matched the given --servers/--tags")
+        return list(selected.values())
+
+    def resolve_targets(self, names: list[str] | None, tags: list[str] | None,
+                        hostnames: list[str] | None) -> list[ServerConfig]:
+        """Servers from --servers/--tags, plus any hostnames passed for this run.
+
+        A hostname that matches a configured server reuses that server's user and tags.
+        Any other hostname is used as-is with the default target user. When hostnames
+        are given and no names or tags are, only those hosts are used.
+        """
+        selected: dict[str, ServerConfig] = {}
+        if names or tags:
+            for server in self.select_servers(names, tags):
+                selected[server.name] = server
+        elif not hostnames:
+            return list(self.servers.values())
+
+        by_host = {server.host: server for server in self.servers.values()}
+        for host in hostnames or []:
+            if not _HOSTNAME.match(host) or ".." in host:
+                raise ConfigError(
+                    f"Invalid hostname '{host}'. Use a DNS name or IPv4 address, "
+                    "with no spaces or shell characters."
+                )
+            known = by_host.get(host)
+            if known:
+                selected[known.name] = known
+            elif host not in selected:
+                selected[host] = ServerConfig(name=host, host=host)
+        if not selected:
+            raise ConfigError("No servers matched the given --servers, --tags, or --hostname")
         return list(selected.values())
 
     def get_script(self, name: str) -> ScriptConfig:

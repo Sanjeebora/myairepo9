@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}New run{% endblock %}
+{% block body %}
+  <p class="muted">Connects to the jumpserver, runs <code>ccps</code>, runs the scripts you tick, then asks your LLM for an action plan. Only scripts listed in the config can run.</p>
+
+  {% if error %}
+    <p class="error">{{ error }}</p>
+    {% if not cfg %}
+      <div class="card">
+        <p>Create <code>config.yaml</code> and <code>.env</code> in this folder, then refresh this page.</p>
+        <p>On Windows PowerShell:</p>
+        <pre>Copy-Item config.example.yaml config.yaml
+Copy-Item .env.example .env
+notepad config.yaml
+notepad .env</pre>
+      </div>
+    {% endif %}
+  {% endif %}
+
+  {% if cfg %}
+    <div class="card">
+      <p>Jumpserver: <strong>{{ cfg.jumpserver.username }}@{{ cfg.jumpserver.host }}:{{ cfg.jumpserver.port }}</strong></p>
+      <p>Before ccps: <code>{{ cfg.jumpserver.become or "not used" }}</code></p>
+      <p>ccps: <code>{{ cfg.ccps.command }}</code> ({{ cfg.ccps.mode }})</p>
+      <p>LLM: {{ cfg.llm.model }} — API key {{ "is set" if cfg.llm.api_key else "is not set" }}</p>
+    </div>
+
+    <form method="post" action="{{ url_for('start_run') }}">
+      <h2>Scripts</h2>
+      <div class="grid">
+        {% for script in cfg.scripts.values() %}
+          <label>
+            <input type="checkbox" name="script" value="{{ script.name }}" {% if loop.first %}checked{% endif %}>
+            <span><strong>{{ script.name }}</strong><br><span class="muted">{{ script.remote_path or script.local_file }}{% if script.args %} {{ script.args | join(' ') }}{% endif %}{% if script.description %} — {{ script.description }}{% endif %}</span></span>
+          </label>
+        {% endfor %}
+      </div>
+
+      <h2>Servers</h2>
+      <p class="muted">Leave them all unticked to run every server in the config. A hostname below limits the run to the hosts you type. The same script path is used on every server.</p>
+      <p>
+        <label for="hostname">Hostname</label><br>
+        <input id="hostname" name="hostname" type="text" size="48"
+               placeholder="db01.internal, db02.internal"
+               autocomplete="off">
+      </p>
+      <div class="grid">
+        {% for server in cfg.servers.values() %}
+          <label>
+            <input type="checkbox" name="server" value="{{ server.name }}">
+            <span><strong>{{ server.name }}</strong><br><span class="muted">{{ server.host }}{% if server.tags %} · {{ server.tags | join(", ") }}{% endif %}</span></span>
+          </label>
+        {% endfor %}
+      </div>
+
+      <div class="checks">
+        <label><input type="checkbox" name="pass_hostname" value="1"> Pass the hostname as an argument</label>
+        <label><input type="checkbox" name="dry_run" value="1"> Dry run (show commands, do not connect)</label>
+        <label><input type="checkbox" name="no_llm" value="1"> Skip the LLM</label>
+      </div>
+      <button type="submit">Run</button>
+    </form>
+  {% endif %}
+{% endblock %}

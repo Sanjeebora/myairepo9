@@ -1,0 +1,79 @@
+:root {
+  color-scheme: light;
+  --ink: #1c2430;
+  --muted: #5c6b7a;
+  --line: #d5dde6;
+  --paper: #f4f7f8;
+  --card: #ffffff;
+  --ok: #0f7b4c;
+  --warn: #8a5a00;
+  --bad: #a12622;
+  --accent: #0b5f75;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font: 16px/1.5 "Segoe UI", system-ui, sans-serif;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+header, main { max-width: 960px; margin: 0 auto; padding: 1.25rem 1.25rem 0; }
+main { padding-bottom: 3rem; }
+
+header { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
+header h1 { font-size: 1.25rem; margin: 0; }
+header a { color: var(--accent); }
+
+h2 { font-size: 1.05rem; margin: 1.5rem 0 0.5rem; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 1rem 1.1rem;
+  margin-top: 1rem;
+}
+
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem 1.5rem; }
+label { display: flex; gap: 0.5rem; align-items: flex-start; }
+.muted { color: var(--muted); }
+.error { color: var(--bad); background: #fdeceb; border: 1px solid #f3c7c5; padding: 0.7rem 0.9rem; border-radius: 8px; }
+
+button, .button {
+  background: var(--accent);
+  color: white;
+  border: 0;
+  border-radius: 6px;
+  padding: 0.55rem 1rem;
+  font: inherit;
+  text-decoration: none;
+  display: inline-block;
+  cursor: pointer;
+}
+
+.checks { display: flex; gap: 1.25rem; margin: 0.8rem 0; }
+
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; }
+
+pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #eef3f6;
+  border-radius: 6px;
+  padding: 0.75rem;
+  overflow: auto;
+}
+
+.pill { font-weight: 700; letter-spacing: 0.02em; }
+.pill.ok, .status-ok { color: var(--ok); }
+.pill.warn, .status-warning { color: var(--warn); }
+.pill.bad, .status-critical, .status-failed, .status-error, .status-timeout, .status-connection_error { color: var(--bad); }
+
+@media (max-width: 700px) {
+  .grid { grid-template-columns: 1fr; }
+}

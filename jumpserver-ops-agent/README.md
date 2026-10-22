@@ -19,13 +19,35 @@ this machine --SSH--> jumpserver --(ccps)--> ssh target --> dba_checkout.sh
 - Jumpserver host keys are verified against `known_hosts` by default.
 - Secrets (the LLM API key and the jumpserver password) are read from environment variables or `.env`, never from the config file.
 
-## Setup
+## Setup on Windows (PowerShell)
+
+Run each line on its own. Windows PowerShell 5.1 does not accept `&&`, and the virtual environment lives in `.venv\Scripts`, not `.venv/bin`.
+
+```powershell
+cd jumpserver-ops-agent
+python -m venv .venv
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item config.example.yaml config.yaml
+Copy-Item .env.example .env
+notepad config.yaml
+notepad .env
+python -m ops_agent web
+```
+
+Then open http://127.0.0.1:5000 in your browser. Tick `dba_checkout`, tick **Dry run** the first time, and press Run. A dry run only shows the commands. It does not connect.
+
+If `python` is not found, use `py -3` instead of `python` on the `venv` line.
+
+## Setup on Linux or macOS
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 cp config.example.yaml config.yaml   # edit jumpserver, servers, scripts, llm
 cp .env.example .env                 # set JUMP_USER, LLM_API_KEY
+python -m ops_agent web              # http://127.0.0.1:5000
 ```
 
 ### LLM settings
@@ -38,28 +60,81 @@ cp .env.example .env                 # set JUMP_USER, LLM_API_KEY
 
 If your endpoint rejects `response_format`, set `json_mode: false`.
 
+### Become oracle, then ccps
+
+On the jumpserver the agent switches to the oracle login account before `ccps`:
+
+```text
+sudo su - oracle -c 'ccps'
+```
+
+Typing `sudo su - oracle` by itself opens a shell and waits for the keyboard, so the agent passes the command with `-c`. That is the same login shell (`su -`), and `ccps` runs only after the switch. Each `ssh` to a database server uses the same switch, because that is the account you are on after `su - oracle`. `sudo` must not ask for a password. Set `jumpserver.become` to `""` to skip the switch.
+
 ### ccps modes
 
-- `mode: once` (default): runs `ccps` once after connecting. It must exit with code 0.
-- `mode: per_command`: runs `ccps` in the same shell before every `ssh` to a target. Use this if
-  `ccps` only affects the current shell session, for example by starting an `ssh-agent`.
+- `mode: once` (default): runs `sudo su - oracle -c 'ccps'` once. It must exit with code 0. Later ssh commands are a new `sudo su - oracle -c 'ssh ...'`.
+- `mode: per_command`: runs `ccps` in the same oracle shell as the ssh: `sudo su - oracle -c 'ccps && ssh ...'`. Use this if `ccps` only affects the current shell, for example by starting an `ssh-agent`.
 
 `ccps` must not prompt for input. If it asks for a password or OTP, tell me how it prompts so that support can be added.
 
 ### Scripts
 
+The script path is the same on every server. Put that path in `remote_path`:
+
+```yaml
+scripts:
+  showsid:
+    remote_path: /dba/bin/showsid
+  showusers:
+    remote_path: /dba/bin/showusers
+  dba_checkout:
+    remote_path: /dba/bin/dba_checkout
+  start_oracle:
+    remote_path: /dba/bin/start_oracle
+  maint_mode:
+    remote_path: /dba/bin/maint_mode.sh
+    args: ["-s"]
+```
+
 - `remote_path`: the script already exists on each target and is run as `ssh target /path/script args`.
 - `local_file`: the script is stored in this project and sent to each target over stdin (`bash -s`), so you do not need to copy it to the servers.
 
-## Usage
+### Hostname
+
+`--hostname` (or the Hostname box) chooses which hosts this run contacts. Repeat the flag, or separate names with commas. Used on its own, only those hosts are contacted. A name that matches a configured server keeps that server's user. Any other name is used with `target_ssh.user`.
+
+`--pass-hostname` (or the checkbox **Pass the hostname as an argument**) appends that host after the script and its fixed arguments:
+
+```text
+/dba/bin/dba_checkout proddb01.internal
+/dba/bin/maint_mode.sh -s proddb01.internal
+```
+
+Leave the option off when the script does not expect a hostname. To always pass it for one script, set `pass_hostname: true` in the config, or put `{hostname}` where you want it inside `args`.
+
+## Web UI
+
+`python -m ops_agent web` starts Flask on http://127.0.0.1:5000 and listens on this computer only. The page lists the scripts and servers from `config.yaml`. There is no box for a free-form command: the agent can run only the allowlisted scripts.
+
+- **Hostname** runs only the hosts you type. Leave it blank to use the ticked servers.
+- **Pass the hostname as an argument** appends each host to the script, after flags such as `-s`.
+- **Dry run** prints the `ccps` and `ssh` commands and does not connect.
+- **Skip the LLM** collects script output and skips the action plan.
+- Finished runs are listed under **Reports**, including the redacted raw logs.
+
+## Command line
 
 ```bash
 python -m ops_agent list                                     # validate config
 python -m ops_agent run -s dba_checkout --dry-run            # show exact commands, connect to nothing
 python -m ops_agent run -s dba_checkout                      # all servers
 python -m ops_agent run -s dba_checkout --tags prod
-python -m ops_agent run -s dba_checkout -s os_checkout --servers proddb01,proddb02
+python -m ops_agent run -s dba_checkout --hostname proddb01.internal
+python -m ops_agent run -s dba_checkout --hostname proddb01.internal --pass-hostname
+python -m ops_agent run -s maint_mode --hostname proddb01.internal --pass-hostname --dry-run
+python -m ops_agent run -s showsid -s showusers --servers proddb01,proddb02
 python -m ops_agent run -s dba_checkout --no-llm             # collect output only
+python -m ops_agent web                                      # browser UI
 ```
 
 Each run writes `reports/<timestamp>/`:

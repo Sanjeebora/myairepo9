@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Report {{ report.id }}{% endblock %}
+{% block body %}
+  <h2>Report {{ report.id }}</h2>
+  <p class="muted">{{ report.generated_at }}</p>
+  <table>
+    <tr><th>Server</th><th>Script</th><th>Status</th><th>Exit</th></tr>
+    {% for result in report.results %}
+      <tr>
+        <td>{{ result.server }}</td>
+        <td>{{ result.script }}</td>
+        <td class="status-{{ result.status }}">{{ result.status }}</td>
+        <td>{{ result.exit_code }}</td>
+      </tr>
+    {% endfor %}
+  </table>
+  {% with plan=report.plan %}
+    {% include "_plan.html" %}
+  {% endwith %}
+  {% if logs %}
+    <h2>Raw output</h2>
+    <ul>
+      {% for name in logs %}
+        <li><a href="{{ url_for('raw_log', report_id=report.id, name=name) }}">{{ name }}</a></li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+{% endblock %}

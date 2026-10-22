@@ -95,6 +95,66 @@ def test_script_needs_exactly_one_source(make_config):
         make_config(body=bad)
 
 
+def test_sudo_su_oracle_runs_before_ccps_and_ssh(make_config):
+    import subprocess
+
+    cfg = make_config()
+    assert cfg.jumpserver.become == "sudo su - oracle"
+    runner = JumpServerRunner(cfg, FakeExecutor({}))
+    ccps = runner.wrap(cfg.ccps.command)
+    ssh = runner.build_command(cfg.servers["db01"], cfg.scripts["dba_checkout"])
+    for command in (ccps, ssh):
+        assert "sudo su - oracle -c" in command
+        subprocess.run(["bash", "-n", "-c", command], check=True)
+    assert ccps.index("sudo su - oracle") < ccps.index("ccps")
+    assert "ccps" not in ssh
+    assert ssh.index("sudo su - oracle") < ssh.index("dba_checkout.sh")
+
+    per = JumpServerRunner(make_config(mode="per_command"), FakeExecutor({}))
+    same_shell = per.build_command(cfg.servers["db01"], cfg.scripts["dba_checkout"])
+    assert same_shell.index("{ ccps;") < same_shell.index("ssh")
+    assert "sudo su - oracle -c" in same_shell
+
+    disabled = CONFIG.replace("  host: jump.local\n", "  host: jump.local\n  become: ''\n")
+    plain = JumpServerRunner(make_config(body=disabled), FakeExecutor({}))
+    bare = plain.wrap("ccps")
+    assert "sudo" not in bare and "su - oracle" not in bare
+
+
+def test_pass_hostname_appends_host_after_fixed_args(make_config):
+    cfg = make_config()
+    script = cfg.scripts["dba_checkout"]
+    script.remote_path = "/dba/bin/maint_mode.sh"
+    script.args = ["-s"]
+    runner = JumpServerRunner(cfg, FakeExecutor({}))
+
+    plain = runner.build_command(cfg.servers["db01"], script)
+    assert "/dba/bin/maint_mode.sh -s" in plain
+    assert plain.count("db01.internal") == 1
+
+    with_host = runner.build_command(cfg.servers["db01"], script, pass_hostname=True)
+    assert "/dba/bin/maint_mode.sh -s db01.internal" in with_host
+    assert with_host.count("db01.internal") == 2
+
+
+def test_hostname_option_targets_that_host_and_can_be_passed_to_the_script(make_config):
+    cfg = make_config()
+    targets = cfg.resolve_targets(None, None, ["spare.example.com"])
+    assert [server.host for server in targets] == ["spare.example.com"]
+    assert [server.name for server in cfg.resolve_targets(None, None, ["db02.internal"])] == ["db02"]
+
+    with pytest.raises(ConfigError, match="Invalid hostname"):
+        cfg.resolve_targets(None, None, ["db01.internal;id"])
+
+    cfg.scripts["dba_checkout"].args = ["{hostname}"]
+    cfg.scripts["dba_checkout"].pass_hostname = True
+    runner = JumpServerRunner(cfg, FakeExecutor({}))
+    command = runner.build_command(cfg.servers["db01"], cfg.scripts["dba_checkout"])
+    assert "oracle@db01.internal" in command
+    assert command.count("db01.internal") == 2
+    assert "db02" not in command
+
+
 def test_build_command_quotes_and_uses_users(make_config):
     cfg = make_config()
     runner = JumpServerRunner(cfg, FakeExecutor({}))

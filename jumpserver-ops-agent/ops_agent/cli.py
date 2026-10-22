@@ -7,14 +7,21 @@ import sys
 from dotenv import load_dotenv
 
 from .config import ConfigError, load_config
-from .llm import OpenAIChatModel, analyze
-from .redact import Redactor
-from .report import write_report
-from .ssh_runner import JumpServerRunner, ParamikoExecutor
+from .runner import execute_run
 
 
 def _csv(value: str) -> list[str]:
     return [v.strip() for v in value.split(",") if v.strip()]
+
+
+def _hostnames(values: list[str] | None) -> list[str] | None:
+    if not values:
+        return None
+    hosts: list[str] = []
+    for value in values:
+        hosts.extend(part for part in value.replace("\n", ",").split(",") if part.strip())
+    cleaned = [host.strip() for host in hosts if host.strip()]
+    return cleaned or None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,17 +38,28 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="Connect, run ccps, run scripts, analyze with the LLM")
     run.add_argument("-s", "--script", action="append", required=True,
                      help="Allowlisted script name (repeatable), e.g. dba_checkout")
-    run.add_argument("--servers", type=_csv, help="Comma-separated server names (default: all)")
+    run.add_argument("--servers", type=_csv, help="Comma-separated server names from the config (default: all)")
     run.add_argument("--tags", type=_csv, help="Comma-separated tags to select servers")
+    run.add_argument("-H", "--hostname", action="append",
+                     help="Target hostname for this run. Repeat the flag, or separate names with commas. "
+                          "When used alone, only these hosts are contacted.")
+    run.add_argument("--pass-hostname", action="store_true",
+                     help="Append each target hostname as the last argument of the script "
+                          "(after any args in the config, such as -s)")
     run.add_argument("--no-llm", action="store_true", help="Only collect output, skip the LLM")
     run.add_argument("--dry-run", action="store_true",
                      help="Print the commands that would run on the jumpserver and exit")
+
+    web = sub.add_parser("web", help="Open the browser UI (Flask) on this PC")
+    web.add_argument("--host", default="127.0.0.1", help="Bind address (default: this PC only)")
+    web.add_argument("--port", type=int, default=5000)
     return parser
 
 
 def cmd_list(cfg) -> int:
     print(f"Jumpserver: {cfg.jumpserver.username}@{cfg.jumpserver.host}:{cfg.jumpserver.port}")
-    print(f"ccps: '{cfg.ccps.command}' (mode={cfg.ccps.mode})")
+    become = cfg.jumpserver.become or "not used"
+    print(f"ccps: '{cfg.ccps.command}' (mode={cfg.ccps.mode}) after: {become}")
     print(f"LLM: {cfg.llm.provider} model={cfg.llm.model} "
           f"key_env={cfg.llm.api_key_env} ({'set' if cfg.llm.api_key else 'NOT SET'})")
     print("\nServers:")
@@ -50,47 +68,26 @@ def cmd_list(cfg) -> int:
     print("\nScripts:")
     for s in cfg.scripts.values():
         where = s.remote_path or f"local:{s.local_file}"
-        print(f"  {s.name:<20} {where}  {s.description}")
+        extra = " ".join(s.args)
+        print(f"  {s.name:<20} {where} {extra}  {s.description}".rstrip())
     return 0
 
 
 def cmd_run(cfg, args) -> int:
-    scripts = [cfg.get_script(name) for name in args.script]
-    servers = cfg.select_servers(args.servers, args.tags)
-    redactor = Redactor(cfg.redact_patterns)
-
-    if args.dry_run:
-        runner = JumpServerRunner(cfg, executor=None)  # type: ignore[arg-type]
-        if cfg.ccps.mode == "once":
-            print(f"[jumpserver] {runner.wrap(cfg.ccps.command)}")
-        for server in servers:
-            for script in scripts:
-                print(f"[{server.name}] {runner.build_command(server, script)}")
+    outcome = execute_run(cfg, args.script, args.servers, args.tags, _hostnames(args.hostname),
+                          dry_run=args.dry_run, no_llm=args.no_llm,
+                          pass_hostname=args.pass_hostname)
+    if outcome.dry_run:
+        print("\n".join(outcome.commands))
         return 0
-
-    model = None if args.no_llm else OpenAIChatModel(cfg.llm)
-
-    with ParamikoExecutor(cfg) as executor:
-        runner = JumpServerRunner(cfg, executor)
-        if cfg.ccps.mode == "once":
-            runner.run_ccps()
-        results = runner.run_many(servers, scripts)
-
-    plan = None
-    if model is not None:
-        logging.info("Sending results to %s for analysis", cfg.llm.model)
-        plan = analyze(results, model, cfg.llm, redactor)
-
-    out_dir = write_report(cfg.reports_dir, plan, results, redactor)
-
     print()
-    for r in results:
-        print(f"  {r.server:<20} {r.script:<20} {r.status} (exit {r.exit_code})")
-    if plan:
-        print(f"\nOverall status: {plan.get('overall_status')}\n{plan.get('summary', '')}")
-        print(f"\nAction plan: {out_dir / 'report.md'}")
-    print(f"Raw output:  {out_dir / 'raw'}")
-    return 0 if all(r.status == "ok" for r in results) else 2
+    for result in outcome.results:
+        print(f"  {result.server:<20} {result.script:<20} {result.status} (exit {result.exit_code})")
+    if outcome.plan:
+        print(f"\nOverall status: {outcome.plan.get('overall_status')}\n{outcome.plan.get('summary', '')}")
+        print(f"\nAction plan: {outcome.report_dir / 'report.md'}")
+    print(f"Raw output:  {outcome.report_dir / 'raw'}")
+    return outcome.exit_code
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -104,6 +101,10 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLogger("paramiko").setLevel(logging.WARNING)
         logging.getLogger("httpx").setLevel(logging.WARNING)
     try:
+        if args.command == "web":
+            from .web import serve
+            serve(args.config, args.host, args.port)
+            return 0
         cfg = load_config(args.config)
         if args.command == "list":
             return cmd_list(cfg)
