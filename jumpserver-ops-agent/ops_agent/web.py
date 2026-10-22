@@ -55,12 +55,13 @@ def create_app(config_path: str | Path = "config.yaml", executor_factory=None,
             return render_template("index.html", cfg=None, error=error), 400
         script_names = [name for name in request.form.getlist("script") if name.strip()]
         server_names = [name for name in request.form.getlist("server") if name.strip()] or None
+        hostnames = _split_hosts(request.form.get("hostname", ""))
         dry_run = request.form.get("dry_run") == "1"
         no_llm = request.form.get("no_llm") == "1"
         if not script_names:
             return render_template("index.html", cfg=cfg, error="Select at least one script."), 400
         try:
-            preview_commands(cfg, script_names, server_names, None)
+            preview_commands(cfg, script_names, server_names, None, hostnames)
         except ConfigError as exc:
             return render_template("index.html", cfg=cfg, error=str(exc)), 400
 
@@ -74,7 +75,7 @@ def create_app(config_path: str | Path = "config.yaml", executor_factory=None,
                 if app.config["MODEL_FACTORY"] is not None:
                     kwargs["model_factory"] = app.config["MODEL_FACTORY"]
                 job.outcome = execute_run(
-                    cfg, script_names, server_names, None,
+                    cfg, script_names, server_names, None, hostnames,
                     dry_run=dry_run, no_llm=no_llm or dry_run, **kwargs,
                 )
                 job.status = "done"
@@ -155,6 +156,11 @@ def create_app(config_path: str | Path = "config.yaml", executor_factory=None,
         return path if path.is_file() else None
 
     return app
+
+
+def _split_hosts(value: str) -> list[str] | None:
+    hosts = [part.strip() for part in value.replace("\n", ",").split(",") if part.strip()]
+    return hosts or None
 
 
 def _read_report(path: Path) -> dict:

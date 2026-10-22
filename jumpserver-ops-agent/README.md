@@ -82,10 +82,25 @@ Typing `sudo su - oracle` by itself opens a shell and waits for the keyboard, so
 - `remote_path`: the script already exists on each target and is run as `ssh target /path/script args`.
 - `local_file`: the script is stored in this project and sent to each target over stdin (`bash -s`), so you do not need to copy it to the servers.
 
+### Hostname
+
+Pass the hosts for this run with `--hostname` (or the Hostname box on the web page). Repeat the flag, or separate names with commas. Used on its own, only those hosts are contacted. A name that matches a configured server keeps that server's user. Any other name is used with `target_ssh.user`.
+
+To give the hostname to the script itself, set `pass_hostname: true` or put `{hostname}` in `args`:
+
+```yaml
+dba_checkout:
+  remote_path: /home/oracle/scripts/dba_checkout.sh
+  pass_hostname: true
+```
+
+That runs `dba_checkout.sh proddb01.internal` on `proddb01.internal`.
+
 ## Web UI
 
 `python -m ops_agent web` starts Flask on http://127.0.0.1:5000 and listens on this computer only. The page lists the scripts and servers from `config.yaml`. There is no box for a free-form command: the agent can run only the allowlisted scripts.
 
+- **Hostname** runs only the hosts you type. Leave it blank to use the ticked servers.
 - **Dry run** prints the `ccps` and `ssh` commands and does not connect.
 - **Skip the LLM** collects script output and skips the action plan.
 - Finished runs are listed under **Reports**, including the redacted raw logs.
@@ -97,6 +112,8 @@ python -m ops_agent list                                     # validate config
 python -m ops_agent run -s dba_checkout --dry-run            # show exact commands, connect to nothing
 python -m ops_agent run -s dba_checkout                      # all servers
 python -m ops_agent run -s dba_checkout --tags prod
+python -m ops_agent run -s dba_checkout --hostname proddb01.internal
+python -m ops_agent run -s dba_checkout --hostname proddb01.internal,proddb02.internal
 python -m ops_agent run -s dba_checkout -s os_checkout --servers proddb01,proddb02
 python -m ops_agent run -s dba_checkout --no-llm             # collect output only
 python -m ops_agent web                                      # browser UI

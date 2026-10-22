@@ -37,7 +37,13 @@ notepad .env</pre>
       </div>
 
       <h2>Servers</h2>
-      <p class="muted">Leave them all unticked to run every server in the config.</p>
+      <p class="muted">Leave them all unticked to run every server in the config. A hostname below limits the run to the hosts you type.</p>
+      <p>
+        <label for="hostname">Hostname</label><br>
+        <input id="hostname" name="hostname" type="text" size="48"
+               placeholder="db01.internal, db02.internal"
+               autocomplete="off">
+      </p>
       <div class="grid">
         {% for server in cfg.servers.values() %}
           <label>
