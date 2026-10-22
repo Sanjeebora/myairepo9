@@ -43,6 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("-H", "--hostname", action="append",
                      help="Target hostname for this run. Repeat the flag, or separate names with commas. "
                           "When used alone, only these hosts are contacted.")
+    run.add_argument("--pass-hostname", action="store_true",
+                     help="Append each target hostname as the last argument of the script "
+                          "(after any args in the config, such as -s)")
     run.add_argument("--no-llm", action="store_true", help="Only collect output, skip the LLM")
     run.add_argument("--dry-run", action="store_true",
                      help="Print the commands that would run on the jumpserver and exit")
@@ -65,13 +68,15 @@ def cmd_list(cfg) -> int:
     print("\nScripts:")
     for s in cfg.scripts.values():
         where = s.remote_path or f"local:{s.local_file}"
-        print(f"  {s.name:<20} {where}  {s.description}")
+        extra = " ".join(s.args)
+        print(f"  {s.name:<20} {where} {extra}  {s.description}".rstrip())
     return 0
 
 
 def cmd_run(cfg, args) -> int:
     outcome = execute_run(cfg, args.script, args.servers, args.tags, _hostnames(args.hostname),
-                          dry_run=args.dry_run, no_llm=args.no_llm)
+                          dry_run=args.dry_run, no_llm=args.no_llm,
+                          pass_hostname=args.pass_hostname)
     if outcome.dry_run:
         print("\n".join(outcome.commands))
         return 0

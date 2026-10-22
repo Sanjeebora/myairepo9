@@ -24,7 +24,8 @@ class RunOutcome:
 
 
 def preview_commands(cfg: AppConfig, script_names: list[str], server_names: list[str] | None,
-                     tags: list[str] | None, hostnames: list[str] | None = None) -> list[str]:
+                     tags: list[str] | None, hostnames: list[str] | None = None, *,
+                     pass_hostname: bool = False) -> list[str]:
     scripts = [cfg.get_script(name) for name in script_names]
     servers = cfg.resolve_targets(server_names, tags, hostnames)
     runner = JumpServerRunner(cfg, executor=None)  # type: ignore[arg-type]
@@ -33,19 +34,22 @@ def preview_commands(cfg: AppConfig, script_names: list[str], server_names: list
         lines.append(f"[jumpserver] {runner.wrap(cfg.ccps.command)}")
     for server in servers:
         for script in scripts:
-            lines.append(f"[{server.name}] {runner.build_command(server, script)}")
+            lines.append(
+                f"[{server.name}] {runner.build_command(server, script, pass_hostname=pass_hostname)}"
+            )
     return lines
 
 
 def execute_run(cfg: AppConfig, script_names: list[str], server_names: list[str] | None = None,
                 tags: list[str] | None = None, hostnames: list[str] | None = None, *,
-                dry_run: bool = False, no_llm: bool = False,
+                dry_run: bool = False, no_llm: bool = False, pass_hostname: bool = False,
                 executor_factory=None, model_factory=None) -> RunOutcome:
     """Run ccps and the allowlisted scripts, then ask the LLM for an action plan.
 
     `script_names` must already be in the config allowlist. Nothing else is executed.
     """
-    commands = preview_commands(cfg, script_names, server_names, tags, hostnames)
+    commands = preview_commands(cfg, script_names, server_names, tags, hostnames,
+                                pass_hostname=pass_hostname)
     if dry_run:
         return RunOutcome(exit_code=0, dry_run=True, commands=commands)
 
@@ -60,7 +64,7 @@ def execute_run(cfg: AppConfig, script_names: list[str], server_names: list[str]
         runner = JumpServerRunner(cfg, executor)
         if cfg.ccps.mode == "once":
             runner.run_ccps()
-        results = runner.run_many(servers, scripts)
+        results = runner.run_many(servers, scripts, pass_hostname=pass_hostname)
 
     for result in results:
         result.stdout = redactor(result.stdout)
