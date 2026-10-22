@@ -197,6 +197,31 @@ def test_hostname_field_limits_the_run_to_that_host(app, client):
     assert b"Invalid hostname" in rejected.data
 
 
+def test_pass_hostname_checkbox_appends_the_host(app, client):
+    page = client.get("/")
+    assert b'name="pass_hostname"' in page.data
+    response = client.post("/runs", data={
+        "script": "dba_checkout",
+        "hostname": "spare.example.com",
+        "pass_hostname": "1",
+        "dry_run": "1",
+    })
+    job_id = response.location.rstrip("/").split("/")[-1]
+    job = _wait(app, job_id)
+    text = "\n".join(job.outcome.commands)
+    assert "oracle@spare.example.com" in text
+    assert "/home/oracle/scripts/dba_checkout.sh spare.example.com" in text
+    assert "db01.internal" not in text
+
+
+def test_cli_pass_hostname_appends_argument(config_path, capsys):
+    assert main(["-c", str(config_path), "run", "-s", "dba_checkout",
+                 "--hostname", "spare.example.com", "--pass-hostname", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "/home/oracle/scripts/dba_checkout.sh spare.example.com" in out
+    assert "db01" not in out
+
+
 def test_cli_accepts_hostname(config_path, capsys):
     assert main(["-c", str(config_path), "run", "-s", "dba_checkout",
                  "--hostname", "spare.example.com", "--dry-run"]) == 0
