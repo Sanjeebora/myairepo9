@@ -142,13 +142,22 @@ class JumpServerRunner:
         self.executor = executor
 
     def wrap(self, command: str) -> str:
+        become = (self.config.jumpserver.become or "").strip()
+        if become:
+            # `sudo su - oracle` alone opens an interactive shell and waits. `-c` runs the
+            # command in that same oracle login shell, which is the non-interactive form.
+            command = f"{become} -c {shlex.quote(command)}"
         if self.config.jumpserver.login_shell:
             return f"bash -lc {shlex.quote(command)}"
         return command
 
     def run_ccps(self) -> ExecResult:
         ccps = self.config.ccps
-        log.info("Running '%s' on jumpserver", ccps.command)
+        become = (self.config.jumpserver.become or "").strip()
+        if become:
+            log.info("Running '%s' after '%s'", ccps.command, become)
+        else:
+            log.info("Running '%s' on jumpserver", ccps.command)
         result = self.executor.exec(self.wrap(ccps.command), timeout=ccps.timeout)
         if result.exit_code != 0:
             raise RuntimeError(
