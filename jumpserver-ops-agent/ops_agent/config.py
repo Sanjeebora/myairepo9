@@ -28,6 +28,9 @@ class JumpServerConfig:
     auto_add_host_key: bool = False
     connect_timeout: int = 15
     login_shell: bool = True
+    # Switch to this login account before ccps. Empty string skips the switch.
+    # The agent runs it as `sudo su - oracle -c '<command>'` so it does not wait for a keyboard.
+    become: str | None = "sudo su - oracle"
 
     @property
     def password(self) -> str | None:

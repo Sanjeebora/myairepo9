@@ -42,7 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def cmd_list(cfg) -> int:
     print(f"Jumpserver: {cfg.jumpserver.username}@{cfg.jumpserver.host}:{cfg.jumpserver.port}")
-    print(f"ccps: '{cfg.ccps.command}' (mode={cfg.ccps.mode})")
+    become = cfg.jumpserver.become or "not used"
+    print(f"ccps: '{cfg.ccps.command}' (mode={cfg.ccps.mode}) after: {become}")
     print(f"LLM: {cfg.llm.provider} model={cfg.llm.model} "
           f"key_env={cfg.llm.api_key_env} ({'set' if cfg.llm.api_key else 'NOT SET'})")
     print("\nServers:")

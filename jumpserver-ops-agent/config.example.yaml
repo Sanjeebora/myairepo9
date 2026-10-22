@@ -11,6 +11,10 @@ jumpserver:
   auto_add_host_key: false          # keep false in production; add the host key to known_hosts first
   connect_timeout: 15
   login_shell: true                 # run commands via `bash -lc` so ccps and PATH from profiles are available
+  # Switch to the oracle login account before ccps, then run ccps and each ssh as that user.
+  # The agent uses `sudo su - oracle -c '<command>'`. A bare `sudo su - oracle` would wait
+  # for keyboard input. sudo must not prompt for a password. Set to "" to skip the switch.
+  become: sudo su - oracle
 
 ccps:
   command: ccps

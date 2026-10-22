@@ -20,6 +20,7 @@ notepad .env</pre>
   {% if cfg %}
     <div class="card">
       <p>Jumpserver: <strong>{{ cfg.jumpserver.username }}@{{ cfg.jumpserver.host }}:{{ cfg.jumpserver.port }}</strong></p>
+      <p>Before ccps: <code>{{ cfg.jumpserver.become or "not used" }}</code></p>
       <p>ccps: <code>{{ cfg.ccps.command }}</code> ({{ cfg.ccps.mode }})</p>
       <p>LLM: {{ cfg.llm.model }} — API key {{ "is set" if cfg.llm.api_key else "is not set" }}</p>
     </div>
