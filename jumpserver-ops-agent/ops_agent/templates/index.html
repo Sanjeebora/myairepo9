@@ -31,13 +31,13 @@ notepad .env</pre>
         {% for script in cfg.scripts.values() %}
           <label>
             <input type="checkbox" name="script" value="{{ script.name }}" {% if loop.first %}checked{% endif %}>
-            <span><strong>{{ script.name }}</strong><br><span class="muted">{{ script.description or script.remote_path or script.local_file }}</span></span>
+            <span><strong>{{ script.name }}</strong><br><span class="muted">{{ script.remote_path or script.local_file }}{% if script.args %} {{ script.args | join(' ') }}{% endif %}{% if script.description %} — {{ script.description }}{% endif %}</span></span>
           </label>
         {% endfor %}
       </div>
 
       <h2>Servers</h2>
-      <p class="muted">Leave them all unticked to run every server in the config. A hostname below limits the run to the hosts you type.</p>
+      <p class="muted">Leave them all unticked to run every server in the config. A hostname below limits the run to the hosts you type. The same script path is used on every server.</p>
       <p>
         <label for="hostname">Hostname</label><br>
         <input id="hostname" name="hostname" type="text" size="48"
@@ -54,6 +54,7 @@ notepad .env</pre>
       </div>
 
       <div class="checks">
+        <label><input type="checkbox" name="pass_hostname" value="1"> Pass the hostname as an argument</label>
         <label><input type="checkbox" name="dry_run" value="1"> Dry run (show commands, do not connect)</label>
         <label><input type="checkbox" name="no_llm" value="1"> Skip the LLM</label>
       </div>

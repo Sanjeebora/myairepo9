@@ -58,10 +58,12 @@ def create_app(config_path: str | Path = "config.yaml", executor_factory=None,
         hostnames = _split_hosts(request.form.get("hostname", ""))
         dry_run = request.form.get("dry_run") == "1"
         no_llm = request.form.get("no_llm") == "1"
+        pass_hostname = request.form.get("pass_hostname") == "1"
         if not script_names:
             return render_template("index.html", cfg=cfg, error="Select at least one script."), 400
         try:
-            preview_commands(cfg, script_names, server_names, None, hostnames)
+            preview_commands(cfg, script_names, server_names, None, hostnames,
+                             pass_hostname=pass_hostname)
         except ConfigError as exc:
             return render_template("index.html", cfg=cfg, error=str(exc)), 400
 
@@ -76,7 +78,8 @@ def create_app(config_path: str | Path = "config.yaml", executor_factory=None,
                     kwargs["model_factory"] = app.config["MODEL_FACTORY"]
                 job.outcome = execute_run(
                     cfg, script_names, server_names, None, hostnames,
-                    dry_run=dry_run, no_llm=no_llm or dry_run, **kwargs,
+                    dry_run=dry_run, no_llm=no_llm or dry_run,
+                    pass_hostname=pass_hostname, **kwargs,
                 )
                 job.status = "done"
             except Exception as exc:  # noqa: BLE001 - shown on the run page
