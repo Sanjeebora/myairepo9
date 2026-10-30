@@ -34,9 +34,10 @@ class FakeJump:
         self.script = script
         self.closed = False
 
-    def exec(self, command, timeout):
+    def exec(self, command, timeout, ccps_passphrase=None):
         s = self.script
         s.calls.append((self.username, command, timeout))
+        s.passphrases.append(ccps_passphrase)
         if not s.reach_ssh:
             return Completed(s.returncode, s.preamble.encode(), s.stderr.encode())
         out = f"{s.preamble}{MARKER}\n{s.stdout}"
@@ -53,6 +54,7 @@ class FakeJump:
 class FakeJumpServer:
     def __init__(self):
         self.calls = []
+        self.passphrases = []
         self.sessions = []
         self.returncode = 0
         self.stdout = "ORACLE_SID=PROD1 OK\n"

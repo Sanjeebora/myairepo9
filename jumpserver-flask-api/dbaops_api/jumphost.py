@@ -14,7 +14,7 @@ with warnings.catch_warnings():
     import paramiko
 
 from .config import JumpConfig
-from .runner import MARKER, SUDO_PROMPT, CommandTimeout, Completed
+from .runner import CCPS_PROMPT, MARKER, SUDO_PROMPT, CommandTimeout, Completed
 from .sessions import JumpUnavailable, LoginFailed
 
 log = logging.getLogger(__name__)
@@ -51,18 +51,23 @@ def connect(cfg: JumpConfig, username: str, password: str) -> paramiko.SSHClient
     return client
 
 
-def pump(channel, password: str, timeout: int, sudo_prompt_wait: int) -> Completed:
-    """Read a running command's output and answer sudo's password prompt once.
+def pump(channel, password: str, timeout: int, prompt_wait: int,
+         ccps_passphrase: Optional[str] = None) -> Completed:
+    """Read a running command's output and answer each known prompt once.
 
-    stdin is closed after the password is sent, once the marker shows ssh is starting, or after
-    sudo_prompt_wait seconds. A second prompt (wrong sudo password) then reads EOF and sudo fails
-    instead of hanging. Nothing after sudo can read the password.
+    sudo's prompt gets the person's password; the oracle shell's ccps prompt gets the cp993
+    passphrase. Each answer is sent only when its own prompt appears. stdin is closed once the
+    marker shows ssh is starting, when a prompt repeats (wrong answer), or after prompt_wait
+    seconds without a prompt, so nothing can hang waiting for input.
     """
-    prompt = SUDO_PROMPT.encode()
+    answers = {SUDO_PROMPT.encode(): password,
+               CCPS_PROMPT.encode(): ccps_passphrase or ""}
     marker = MARKER.encode()
     out, err = bytearray(), bytearray()
     started = time.monotonic()
     deadline = started + timeout
+    last_prompt = started
+    answered = set()
     stdin_open = True
     while True:
         progressed = False
@@ -73,12 +78,18 @@ def pump(channel, password: str, timeout: int, sudo_prompt_wait: int) -> Complet
             err += channel.recv_stderr(65536)
             progressed = True
         if stdin_open:
-            if prompt in err:
-                channel.sendall((password + "\n").encode())
+            for prompt, answer in answers.items():
+                if prompt not in err:
+                    continue
                 err = err.replace(prompt, b"", 1)
-                channel.shutdown_write()
-                stdin_open = False
-            elif marker in out or time.monotonic() - started > sudo_prompt_wait:
+                if prompt in answered:
+                    channel.shutdown_write()
+                    stdin_open = False
+                    break
+                channel.sendall((answer + "\n").encode())
+                answered.add(prompt)
+                last_prompt = time.monotonic()
+            if stdin_open and (marker in out or time.monotonic() - last_prompt > prompt_wait):
                 channel.shutdown_write()
                 stdin_open = False
         if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
@@ -87,8 +98,9 @@ def pump(channel, password: str, timeout: int, sudo_prompt_wait: int) -> Complet
             raise CommandTimeout(f"No result within {timeout}s")
         if not progressed:
             time.sleep(0.05)
-    return Completed(channel.recv_exit_status(), bytes(out),
-                     bytes(err.replace(prompt, b"")))
+    for prompt in answers:
+        err = err.replace(prompt, b"")
+    return Completed(channel.recv_exit_status(), bytes(out), bytes(err))
 
 
 class JumpSession:
@@ -112,11 +124,13 @@ class JumpSession:
                 transport = self._client.get_transport()
             return transport
 
-    def exec(self, command: str, timeout: int) -> Completed:
+    def exec(self, command: str, timeout: int,
+             ccps_passphrase: Optional[str] = None) -> Completed:
         channel = self._transport().open_session(timeout=self.cfg.connect_timeout)
         try:
             channel.exec_command(command)
-            return pump(channel, self._password, timeout, self.cfg.sudo_prompt_wait)
+            return pump(channel, self._password, timeout, self.cfg.sudo_prompt_wait,
+                        ccps_passphrase)
         finally:
             channel.close()
 

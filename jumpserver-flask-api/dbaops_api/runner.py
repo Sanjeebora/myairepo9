@@ -15,7 +15,24 @@ log = logging.getLogger(__name__)
 MARKER = "__DBAOPS_SSH_START__"
 CCPS_FAILED = "__DBAOPS_CCPS_FAILED__"
 SUDO_PROMPT = "__DBAOPS_SUDO_PASSWORD__:"
+CCPS_PROMPT = "__DBAOPS_CCPS_PASSPHRASE__:"
 CCPS_EXIT = 97
+
+# ssh-add has no terminal here, so it asks SSH_ASKPASS for the passphrase. The helper answers
+# once only: on a wrong passphrase ssh-add asks again, gets nothing, and fails instead of looping.
+# The passphrase travels on stdin and in the environment, never on a command line (`ps`).
+_ASKPASS_SETUP = [
+    "DBAOPS_TMP=`mktemp -d` || exit {exit}",
+    f"echo {CCPS_PROMPT} >&2",
+    "IFS= read -r DBAOPS_CCPS_PASS || DBAOPS_CCPS_PASS=",
+    "printf '%s\\n' '#!/bin/sh' '[ -e \"$DBAOPS_TMP/used\" ] && exit 1' "
+    "': > \"$DBAOPS_TMP/used\"' 'printf \"%s\\n\" \"$DBAOPS_CCPS_PASS\"' > \"$DBAOPS_TMP/askpass\"",
+    "chmod 700 \"$DBAOPS_TMP/askpass\"",
+    "SSH_ASKPASS=\"$DBAOPS_TMP/askpass\"; SSH_ASKPASS_REQUIRE=force; DISPLAY=\"${{DISPLAY:-dbaops:0}}\"",
+    "export DBAOPS_TMP DBAOPS_CCPS_PASS SSH_ASKPASS SSH_ASKPASS_REQUIRE DISPLAY",
+]
+_ASKPASS_CLEANUP = ("unset DBAOPS_CCPS_PASS SSH_ASKPASS SSH_ASKPASS_REQUIRE DISPLAY; "
+                    "rm -rf \"$DBAOPS_TMP\"")
 TIMEOUT_EXIT = 124
 SSH_CONNECT_EXIT = 255
 
@@ -35,7 +52,8 @@ class Session:
     """What the runner needs from a logged-in person's jump server session."""
     username: str
 
-    def exec(self, command: str, timeout: int) -> Completed: ...
+    def exec(self, command: str, timeout: int,
+             ccps_passphrase: Optional[str] = None) -> Completed: ...
 
     def redact(self, text: str) -> str: ...
 
@@ -75,13 +93,22 @@ class Runner:
         Kept to POSIX sh so it also works when oracle's login shell is ksh.
         """
         timeout = self.config.timeout_for(script)
-        return "\n".join([
-            "trap '[ -n \"$SSH_AGENT_PID\" ] && ssh-agent -k >/dev/null 2>&1' EXIT",
-            f"{{ {self.config.ccps} ; }} </dev/null >&2 || "
-            f"{{ echo {CCPS_FAILED} >&2; exit {CCPS_EXIT}; }}",
+        use_askpass = bool(self.config.ccps_passphrase)
+        lines = [
+            "trap '[ -n \"$DBAOPS_TMP\" ] && rm -rf \"$DBAOPS_TMP\"; "
+            "[ -n \"$SSH_AGENT_PID\" ] && ssh-agent -k >/dev/null 2>&1' EXIT",
+        ]
+        if use_askpass:
+            lines += [line.format(exit=CCPS_EXIT) for line in _ASKPASS_SETUP]
+        lines.append(f"{{ {self.config.ccps} ; }} </dev/null >&2 || "
+                     f"{{ echo {CCPS_FAILED} >&2; exit {CCPS_EXIT}; }}")
+        if use_askpass:
+            lines.append(_ASKPASS_CLEANUP)
+        lines += [
             f"echo {MARKER}; echo {MARKER} >&2",
             f"timeout {timeout} {self.ssh_command(host, script)} </dev/null",
-        ])
+        ]
+        return "\n".join(lines)
 
     def argv(self, host: str, script: ScriptConfig) -> List[str]:
         """The command run in the person's jump server login, e.g. sudo -S -p ... su - oracle -c ..."""
@@ -102,7 +129,8 @@ class Runner:
         started = time.monotonic()
         try:
             # The shell's own `timeout` stops ssh first; this is the backstop if sudo/su hangs.
-            proc = session.exec(self.command(host, script), timeout + 30)
+            proc = session.exec(self.command(host, script), timeout + 30,
+                                ccps_passphrase=self.config.ccps_passphrase)
         except CommandTimeout:
             return RunResult("timeout", None, "", "", command, time.monotonic() - started,
                              f"No response from the jump server within {timeout + 30}s")
@@ -114,8 +142,8 @@ class Runner:
 
         limit = self.config.max_output_bytes
         truncated = len(proc.stdout) > limit
-        stdout = session.redact(proc.stdout[:limit].decode("utf-8", errors="replace"))
-        stderr = session.redact(proc.stderr[-limit:].decode("utf-8", errors="replace"))
+        stdout = self._redact(session, proc.stdout[:limit].decode("utf-8", errors="replace"))
+        stderr = self._redact(session, proc.stderr[-limit:].decode("utf-8", errors="replace"))
 
         pre_out, started_ssh, out = _split(stdout)
         pre_err, _, err = _split(stderr)
@@ -124,6 +152,10 @@ class Runner:
         if not started_ssh:
             if rc == CCPS_EXIT or CCPS_FAILED in stderr:
                 error = "ccps failed (ssh-agent / ssh-add ~/.ssh/cp993) as oracle on the jump server"
+                if self.config.ccps_passphrase:
+                    error += f"; if the key is passphrase-protected, check {self.config.ccps_passphrase_env}"
+                else:
+                    error += f"; if ssh-add needs a passphrase, set {self.config.ccps_passphrase_env}"
                 status = "ccps_failed"
             else:
                 error = (f"{session.username} could not switch to oracle on the jump server "
@@ -140,6 +172,14 @@ class Runner:
                              f"ssh to {host} failed: {err.strip()[-2000:]}", truncated)
         status = "ok" if rc == 0 else "script_failed"
         return RunResult(status, rc, out, err, command, duration, None, truncated)
+
+
+    def _redact(self, session: Session, text: str) -> str:
+        text = session.redact(text).replace(CCPS_PROMPT, "")
+        passphrase = self.config.ccps_passphrase
+        if passphrase and len(passphrase) >= 4:
+            text = text.replace(passphrase, "********")
+        return text
 
 
 def _split(text: str):

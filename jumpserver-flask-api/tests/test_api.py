@@ -111,6 +111,22 @@ def test_password_never_returned(client, headers, fake):
     assert "********" in out["output"]
 
 
+def test_ccps_passphrase_from_env_is_sent_and_masked(client, headers, fake, monkeypatch):
+    monkeypatch.setenv("CCPS_PASSPHRASE", "Test#Phrase9")
+    fake.stdout = "debug: Test#Phrase9\n"
+    out = client.post("/run", headers=headers, json={"host": "db1", "script": "showsid"}).get_json()
+    assert fake.passphrases == ["Test#Phrase9"]
+    assert "Test#Phrase9" not in fake.calls[0][1]  # not on the command line
+    assert "__DBAOPS_CCPS_PASSPHRASE__:" in fake.calls[0][1]
+    assert "Test#Phrase9" not in json.dumps(out)
+
+
+def test_no_askpass_when_passphrase_not_set(client, headers, fake, monkeypatch):
+    monkeypatch.delenv("CCPS_PASSPHRASE", raising=False)
+    client.post("/run", headers=headers, json={"host": "db1", "script": "showsid"})
+    assert "SSH_ASKPASS" not in fake.calls[0][1]
+
+
 def test_script_args_are_quoted_as_one_remote_command(client, headers):
     resp = client.post("/run", headers=headers,
                        json={"host": "dbprod01", "script": "maint_mode", "confirm": True})

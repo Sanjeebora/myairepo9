@@ -11,9 +11,31 @@ from .config import ConfigError, load_config
 from .runner import Runner
 
 
+DEFAULT_ENV_FILE = "/etc/dbaops-api/dbaops.env"
+
+
+def load_env_file(path: str) -> None:
+    """Read KEY=VALUE lines (the systemd EnvironmentFile) without overriding the environment."""
+    try:
+        lines = open(path).read().splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        os.environ.setdefault(key.strip(), value)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="python3.8 -m dbaops_api")
-    parser.add_argument("-c", "--config", default=os.environ.get("DBAOPS_CONFIG", "config.json"))
+    parser.add_argument("--env-file", default=DEFAULT_ENV_FILE,
+                        help=f"KEY=VALUE file to load first (default {DEFAULT_ENV_FILE})")
+    parser.add_argument("-c", "--config", default=None)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     serve = sub.add_parser("serve", help="run the API with Flask's threaded server (testing)")
@@ -33,6 +55,8 @@ def main(argv=None) -> int:
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    load_env_file(args.env_file)
+    args.config = args.config or os.environ.get("DBAOPS_CONFIG", "config.json")
 
     try:
         cfg = load_config(args.config)
@@ -45,6 +69,8 @@ def main(argv=None) -> int:
         print(f"Config OK: {args.config}")
         print(f"Scripts: {', '.join(cfg.scripts)}")
         print(f"People log in to {j.host}:{j.port}; host keys from {j.known_hosts}")
+        print(f"ccps passphrase ({cfg.ccps_passphrase_env}): "
+              f"{'set' if cfg.ccps_passphrase else 'NOT SET (only fine if cp993 has no passphrase)'}")
         if cfg.llm.enabled:
             print(f"LLM: {cfg.llm.model} at {cfg.llm.base_url} "
                   f"(key {'set' if cfg.llm.api_key else 'NOT SET'})")

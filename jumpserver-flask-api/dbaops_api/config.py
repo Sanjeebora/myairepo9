@@ -75,6 +75,8 @@ class AppConfig:
     become: List[str] = field(
         default_factory=lambda: ["sudo", "su", "-", "oracle", "-c"])
     ccps: str = "eval `ssh-agent -s`; ssh-add ~/.ssh/cp993"
+    # Environment variable holding the cp993 passphrase that ssh-add asks for. Empty = no passphrase.
+    ccps_passphrase_env: str = "CCPS_PASSPHRASE"
     ssh_user: Optional[str] = None
     ssh_options: List[str] = field(default_factory=lambda: [
         "-o", "BatchMode=yes",
@@ -101,6 +103,10 @@ class AppConfig:
         if self.jumpserver.allowed_users and username not in self.jumpserver.allowed_users:
             raise ConfigError(f"User '{username}' is not allowed to use this service")
         return username
+
+    @property
+    def ccps_passphrase(self) -> Optional[str]:
+        return os.environ.get(self.ccps_passphrase_env) if self.ccps_passphrase_env else None
 
     def script_path(self, script: ScriptConfig) -> str:
         return self.script_dir.rstrip("/") + "/" + script.file

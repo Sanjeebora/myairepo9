@@ -5,8 +5,8 @@ Each person logs in with **their own jump server username and password**. The ag
 then sends requests with that person's session token, and the service:
 
 1. uses the person's own SSH login to the jump server,
-2. runs `sudo su - oracle` with **their** sudo rights (answering sudo's password prompt with their password if it asks),
-3. runs `ccps` (`eval \`ssh-agent\`; ssh-add ~/.ssh/cp993`) to load the passwordless key,
+2. runs `sudo su - oracle` with **their** sudo rights (normally passwordless; if sudo does ask, it answers with their password),
+3. runs `ccps` (`eval \`ssh-agent\`; ssh-add ~/.ssh/cp993`), answering ssh-add's passphrase prompt with `CCPS_PASSPHRASE`,
 4. runs `ssh <host> /dba/bin/<script>` on the target DB server,
 5. returns the script's stdout and exit code as JSON so your agent can reason over it.
 
@@ -45,8 +45,29 @@ Wrong passwords: five failures in ten minutes for the same username or the same 
 `429` until the window passes. The failures also count toward the jump server's own PAM lockout
 (`pam_faillock`), just like failed SSH logins.
 
-The password is kept in memory only while the session is open, so sudo can be answered. It is never
-logged, and it is masked as `********` if it ever appears in script output.
+The password is kept in memory only while the session is open, so the SSH login can be reopened
+and sudo answered if it ever asks. It is never logged, and it is masked as `********` if it ever
+appears in script output.
+
+## The ccps passphrase
+
+`ccps` runs `ssh-add ~/.ssh/cp993`, which asks for the key's passphrase. There is no terminal, so
+the service supplies it:
+
+- The passphrase is read from the `CCPS_PASSPHRASE` environment variable, which systemd loads from
+  `/etc/dbaops-api/dbaops.env` (readable by root and the `dbaops` group only). It is the same for
+  everyone, because it belongs to oracle's key, not to a person.
+- For each run, the oracle shell prints a marker, and the service writes the passphrase to the SSH
+  session's input. The shell gives it to `ssh-add` through a one-time `SSH_ASKPASS` helper in a
+  private temporary directory, which is deleted before `ssh` starts. The passphrase never appears on a
+  command line, so `ps` cannot show it. It is not passed on to `ssh` or the target, and it is masked in
+  returned output.
+- A wrong passphrase fails at once with `502 ccps_failed`. The helper answers only once, so `ssh-add`
+  cannot keep retrying.
+- Leave `CCPS_PASSPHRASE` empty if cp993 has no passphrase.
+
+Keep the real value out of git (this repository is public). Put it only in the env file on the jump
+server (step 10).
 
 ## What actually runs
 
@@ -60,20 +81,32 @@ sudo -S -p __DBAOPS_SUDO_PASSWORD__: su - oracle -c '<oracle shell>'
 and the oracle shell is:
 
 ```sh
-trap '[ -n "$SSH_AGENT_PID" ] && ssh-agent -k >/dev/null 2>&1' EXIT
+trap '[ -n "$DBAOPS_TMP" ] && rm -rf "$DBAOPS_TMP"; [ -n "$SSH_AGENT_PID" ] && ssh-agent -k >/dev/null 2>&1' EXIT
+# --- only when CCPS_PASSPHRASE is set: receive it on stdin and prepare a one-time askpass helper
+DBAOPS_TMP=`mktemp -d` || exit 97
+echo __DBAOPS_CCPS_PASSPHRASE__: >&2
+IFS= read -r DBAOPS_CCPS_PASS || DBAOPS_CCPS_PASS=
+printf '%s\n' '#!/bin/sh' ... > "$DBAOPS_TMP/askpass"      # answers once, then refuses
+chmod 700 "$DBAOPS_TMP/askpass"
+SSH_ASKPASS="$DBAOPS_TMP/askpass"; SSH_ASKPASS_REQUIRE=force; DISPLAY="${DISPLAY:-dbaops:0}"
+export DBAOPS_TMP DBAOPS_CCPS_PASS SSH_ASKPASS SSH_ASKPASS_REQUIRE DISPLAY
+# ---
 { eval `ssh-agent -s`; ssh-add ~/.ssh/cp993 ; } </dev/null >&2 || { echo __DBAOPS_CCPS_FAILED__ >&2; exit 97; }
+unset DBAOPS_CCPS_PASS SSH_ASKPASS SSH_ASKPASS_REQUIRE DISPLAY; rm -rf "$DBAOPS_TMP"
 echo __DBAOPS_SSH_START__; echo __DBAOPS_SSH_START__ >&2
 timeout 600 ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o StrictHostKeyChecking=yes dbprod01 /dba/bin/dba_checkout </dev/null
 ```
 
-Line 1 kills this request's `ssh-agent` on exit, line 2 is `ccps`, line 3 marks where the returned
-output starts, and line 4 runs the script on the target with a time limit.
+The trap kills this request's `ssh-agent` and removes the helper on exit. The middle block feeds the
+passphrase to `ssh-add`, the `eval ...; ssh-add` line is `ccps`, the marker shows where the returned
+output starts, and the last line runs the script on the target with a time limit. Run `dry-run` to
+see the exact text.
 
 Notes on why it is built this way:
 
-- `sudo -S -p <marker>` makes sudo read the password from the connection and print a recognisable
-  prompt. The service sends the person's password only when that prompt appears, then closes input.
-  If their sudo rule is `NOPASSWD`, nothing is sent.
+- `sudo -S -p <marker>` makes sudo print a recognisable prompt if it ever asks. With your
+  passwordless `sudo su - oracle` it never does, so nothing is sent. Each answer (sudo password or
+  ccps passphrase) is sent only when its own prompt appears, and input is closed before `ssh` starts.
 - `sudo su - oracle` on its own opens an interactive shell and waits for the keyboard. Passing the
   commands with `-c` runs them in the same oracle login shell, which is the non-interactive form.
 - `ccps` is usually an alias in oracle's profile. Aliases are not expanded in a non-interactive
@@ -109,32 +142,27 @@ ssh-agent -k
 exit
 ```
 
-Apart from your own password for `sudo`, you must not be asked anything: no passphrase and no
-"Are you sure you want to continue connecting". If you are, fix it now:
+`sudo su - oracle` should not ask for a password, and `ssh-add` asks only for the cp993 passphrase
+(the service supplies it from `CCPS_PASSPHRASE`). Nothing else may prompt, in particular not
+"Are you sure you want to continue connecting":
 
 - **Host key prompt**: `BatchMode=yes` and `StrictHostKeyChecking=yes` refuse unknown hosts. RHEL 7's
   OpenSSH 7.4 does not support `accept-new`, so add the keys once as oracle
   (`ssh-keyscan dbprod01 >> ~/.ssh/known_hosts`, and check the fingerprints), or ssh to each host by
   hand one time.
-- **Passphrase on cp993**: `ssh-add` cannot prompt without a terminal. The key must have no passphrase,
-  or `ccps` must load it some other way.
 
 ### Step 2. Make sure each person may `sudo su - oracle` (root)
 
-The service uses each person's own sudo rights, so anyone who can already do step 1 is ready. To
-grant it to a group of DBAs, for example:
+The service uses each person's own sudo rights, so anyone who can already do step 1 is ready. Your
+rule is passwordless, for example:
 
-```bash
-cat > /etc/sudoers.d/dba-oracle <<'EOF'
-%dba ALL=(root) /bin/su - oracle*, /usr/bin/su - oracle*
-EOF
-chmod 440 /etc/sudoers.d/dba-oracle
-visudo -cf /etc/sudoers.d/dba-oracle
+```
+%dba ALL=(root) NOPASSWD: /bin/su - oracle*, /usr/bin/su - oracle*
 ```
 
-With this rule sudo asks for the person's own password, which the service supplies. A `NOPASSWD:`
-rule also works. If `/etc/sudoers` contains `Defaults requiretty`, add `Defaults:%dba !requiretty`,
-because the service's commands have no terminal.
+(A rule without `NOPASSWD:` also works: the service then answers sudo with the person's password.)
+If `/etc/sudoers` contains `Defaults requiretty`, add `Defaults:%dba !requiretty`, because the
+service's commands have no terminal.
 
 ### Step 3. Allow password logins to sshd from the jump server itself (root)
 
@@ -225,6 +253,7 @@ The rest:
 | `script_dir` | `/dba/bin`. Every script runs as `<script_dir>/<file>` on the target. |
 | `become` | How to become oracle. Default `["sudo","su","-","oracle","-c"]`. The service adds `-S -p <prompt>` after `sudo`. |
 | `ccps` | The real ccps command, run in the oracle shell before ssh. |
+| `ccps_passphrase_env` | Environment variable holding the cp993 passphrase (default `CCPS_PASSPHRASE`). |
 | `ssh_user` | `null` connects as oracle (the current user). Set a name for `user@host`. |
 | `ssh_options` | Extra `ssh` options. Keep `BatchMode=yes` so ssh never waits for a password. |
 | `host_pattern` | Regex every `host` must match. Tighten it to your naming standard, for example `^db[a-z0-9-]+(\\.corp\\.example\\.com)?$`. |
@@ -252,11 +281,21 @@ Each script entry (the `//` notes are explanations only; JSON does not allow com
 `/scripts` and `/tools` are generated from this list, so your agent always sees the current allow-list.
 Keys that start with `_` are ignored, so you can use `"_comment"`.
 
-### Step 8. Test as yourself from the command line
+### Step 8. Store the ccps passphrase, then test as yourself (root)
+
+Create the env file and put the cp993 passphrase in it:
+
+```bash
+cp /opt/dbaops-api/deploy/dbaops.env.example /etc/dbaops-api/dbaops.env
+chown root:dbaops /etc/dbaops-api/dbaops.env && chmod 640 /etc/dbaops-api/dbaops.env
+vi /etc/dbaops-api/dbaops.env          # set:  CCPS_PASSPHRASE=<the cp993 passphrase>
+```
+
+The CLI and the service both read this file. Then:
 
 ```bash
 cd /opt/dbaops-api
-sudo -u dbaops venv/bin/python -m dbaops_api check
+sudo -u dbaops venv/bin/python -m dbaops_api check      # should say "ccps passphrase (CCPS_PASSPHRASE): set"
 sudo -u dbaops venv/bin/python -m dbaops_api dry-run --host dbprod01 --script dba_checkout
 sudo -u dbaops venv/bin/python -W ignore -m dbaops_api try --user jsmith --host dbprod01 --script dba_checkout
 ```
@@ -281,9 +320,9 @@ RHEL 7's OpenSSL 1.0.2 does not support `-addext`. If the harness checks the hos
 
 ### Step 10. Run it as a systemd service (root)
 
+The unit loads `/etc/dbaops-api/dbaops.env` from step 8, including `CCPS_PASSPHRASE`.
+
 ```bash
-cp /opt/dbaops-api/deploy/dbaops.env.example /etc/dbaops-api/dbaops.env
-chown root:dbaops /etc/dbaops-api/dbaops.env && chmod 640 /etc/dbaops-api/dbaops.env
 cp /opt/dbaops-api/deploy/dbaops-api.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now dbaops-api
@@ -431,6 +470,9 @@ sends `"confirm": true`, rather than letting the LLM set it on its own.
 - Passwords are accepted only over HTTPS (or from the jump server itself). They are never logged or
   written to disk, they are masked in returned output, and they are sent only to an SSH server whose
   host key is in `known_hosts`.
+- The cp993 passphrase lives only in `/etc/dbaops-api/dbaops.env` (mode 640, root:dbaops). It reaches
+  `ssh-add` through stdin and a one-time askpass helper. It is never on a command line, never logged,
+  never passed to the target, and masked in output.
 - Failed logins are rate-limited per username and per IP, on top of the jump server's own PAM lockout.
 - Sessions expire after inactivity and after a maximum lifetime, and `DELETE /session` closes them
   at once. Restarting the service logs everyone out.
@@ -452,6 +494,8 @@ sends `"confirm": true`, rather than letting the LLM set it on its own.
 | `502 become_failed`, `you must have a tty to run sudo` | Add `Defaults:%dba !requiretty` (step 2). |
 | `502 ccps_failed`, `Could not open a connection to your authentication agent` | `ssh-agent` did not start. Check the `ccps` value in `config.json`. |
 | `502 ccps_failed`, `No such file` or `bad permissions` | `~oracle/.ssh/cp993` is missing or not mode 600. |
+| `502 ccps_failed`, `check CCPS_PASSPHRASE` | The passphrase in `/etc/dbaops-api/dbaops.env` is wrong. Test it as oracle with `ssh-keygen -y -f ~/.ssh/cp993`, fix the file, then `systemctl restart dbaops-api`. |
+| `502 ccps_failed`, `set CCPS_PASSPHRASE` | cp993 has a passphrase but `CCPS_PASSPHRASE` is empty (step 8). |
 | `502 ssh_failed`, `Host key verification failed` | Add the target to `~oracle/.ssh/known_hosts` (step 1). |
 | `502 ssh_failed`, `Permission denied (publickey)` | cp993's public key is not in the target's `authorized_keys`. |
 | `502 timeout` | The script ran longer than its `timeout`. Raise it for that script, and keep gunicorn's `--timeout` higher. |

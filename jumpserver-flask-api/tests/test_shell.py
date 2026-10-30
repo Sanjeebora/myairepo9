@@ -17,6 +17,7 @@ FAKE_SSH = """#!/bin/sh
 echo "args: $*"
 echo "keys: $(ssh-add -l 2>/dev/null | wc -l)"
 echo "$SSH_AGENT_PID" > "$PIDFILE"
+echo "leaked env: $(env | grep -c -e DBAOPS_CCPS_PASS -e SSH_ASKPASS)"
 case "$*" in
   *dead*) echo "ssh: connect to host dead port 22: Connection refused" >&2; exit 255 ;;
   *slow*) sleep 30 ;;
@@ -37,18 +38,32 @@ def env(tmp_path, monkeypatch):
     subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setenv("PIDFILE", str(tmp_path / "agent.pid"))
-    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
-    monkeypatch.delenv("SSH_AGENT_PID", raising=False)
+    for var in ("SSH_AUTH_SOCK", "SSH_AGENT_PID", "CCPS_PASSPHRASE", "DISPLAY", "SSH_ASKPASS"):
+        monkeypatch.delenv(var, raising=False)
+    (tmp_path / "tmp").mkdir()
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "tmp"))
+    return tmp_path, key
+
+
+@pytest.fixture
+def locked_key(env, monkeypatch):
+    tmp_path, _ = env
+    key = tmp_path / "cp993_locked"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "bake-test-Pw", "-f", str(key)],
+                   check=True)
+    monkeypatch.setenv("CCPS_PASSPHRASE", "bake-test-Pw")
     return tmp_path, key
 
 
 class LocalSession:
-    """Runs the jump server command with a local shell in place of an SSH login."""
+    """Runs the jump server command with a local shell in place of an SSH login.
+    Like the real session, the passphrase is written to stdin, never put on a command line."""
     username = "tester"
 
-    def exec(self, command, timeout):
-        proc = subprocess.run(command, shell=True, stdin=subprocess.DEVNULL,
-                              capture_output=True, timeout=timeout)
+    def exec(self, command, timeout, ccps_passphrase=None):
+        data = (ccps_passphrase + "\n").encode() if ccps_passphrase else b""
+        proc = subprocess.run(command, shell=True, input=data, capture_output=True,
+                              timeout=timeout, start_new_session=True)
         return Completed(proc.returncode, proc.stdout, proc.stderr)
 
     def redact(self, text):
@@ -134,6 +149,38 @@ def test_script_timeout(env):
     assert result.status == "timeout"
     assert result.exit_code == 124
     assert not agent_alive(tmp_path)
+
+
+def test_ccps_passphrase_is_supplied_to_ssh_add(locked_key):
+    tmp_path, key = locked_key
+    runner = make_runner(tmp_path, key)
+    assert "bake-test-Pw" not in runner.runner.command("dbprod01", runner.config.scripts["dba_checkout"])
+    result = runner.run("dbprod01", runner.config.scripts["dba_checkout"])
+    assert result.status == "ok", result
+    assert "keys: 1" in result.output
+    assert "leaked env: 0" in result.output  # passphrase is not passed on to ssh
+    assert "bake-test-Pw" not in result.output + result.stderr
+    assert "__DBAOPS" not in result.stderr
+    assert list((tmp_path / "tmp").iterdir()) == []  # askpass helper removed
+    assert not agent_alive(tmp_path)
+
+
+def test_wrong_ccps_passphrase_fails_fast(locked_key, monkeypatch):
+    tmp_path, key = locked_key
+    monkeypatch.setenv("CCPS_PASSPHRASE", "wrong-one")
+    runner = make_runner(tmp_path, key)
+    result = runner.run("dbprod01", runner.config.scripts["dba_checkout"])
+    assert result.status == "ccps_failed"
+    assert result.duration_s < 5  # ssh-add does not keep retrying
+    assert list((tmp_path / "tmp").iterdir()) == []
+
+
+def test_locked_key_without_passphrase_configured_fails(locked_key, monkeypatch):
+    tmp_path, key = locked_key
+    monkeypatch.delenv("CCPS_PASSPHRASE")
+    runner = make_runner(tmp_path, key)
+    result = runner.run("dbprod01", runner.config.scripts["dba_checkout"])
+    assert result.status == "ccps_failed"
 
 
 def test_login_profile_noise_is_not_in_output(env):

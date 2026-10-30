@@ -19,6 +19,8 @@
   "script_dir": "/dba/bin",
   "become": ["sudo", "su", "-", "oracle", "-c"],
   "ccps": "eval `ssh-agent -s`; ssh-add ~/.ssh/cp993",
+  "_ccps_passphrase_env": "ssh-add's passphrase is read from this environment variable (set in /etc/dbaops-api/dbaops.env)",
+  "ccps_passphrase_env": "CCPS_PASSPHRASE",
 
   "ssh_user": null,
   "ssh_options": [

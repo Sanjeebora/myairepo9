@@ -2,7 +2,7 @@
 import pytest
 
 from dbaops_api.jumphost import pump
-from dbaops_api.runner import MARKER, SUDO_PROMPT, CommandTimeout
+from dbaops_api.runner import CCPS_PROMPT, MARKER, SUDO_PROMPT, CommandTimeout
 
 
 class FakeChannel:
@@ -57,7 +57,7 @@ class FakeChannel:
 def test_password_sent_when_sudo_asks_and_prompt_removed():
     ch = FakeChannel([("err", SUDO_PROMPT.encode()), ("wait_stdin", None),
                       ("out", f"{MARKER}\nok\n".encode())])
-    res = pump(ch, "Secret#123", timeout=5, sudo_prompt_wait=5)
+    res = pump(ch, "Secret#123", timeout=5, prompt_wait=5)
     assert ch.sent == b"Secret#123\n"
     assert ch.stdin_closed
     assert SUDO_PROMPT.encode() not in res.stderr
@@ -66,7 +66,7 @@ def test_password_sent_when_sudo_asks_and_prompt_removed():
 
 def test_no_password_sent_when_sudo_does_not_ask():
     ch = FakeChannel([("out", f"banner\n{MARKER}\nok\n".encode())])
-    pump(ch, "Secret#123", timeout=5, sudo_prompt_wait=5)
+    pump(ch, "Secret#123", timeout=5, prompt_wait=5)
     assert ch.sent == b""
     assert ch.stdin_closed
 
@@ -75,16 +75,47 @@ def test_second_prompt_is_not_answered():
     ch = FakeChannel([("err", SUDO_PROMPT.encode()), ("wait_stdin", None),
                       ("err", b"Sorry, try again.\n" + SUDO_PROMPT.encode()),
                       ("err", b"sudo: 1 incorrect password attempt\n")], exit_code=1)
-    res = pump(ch, "wrong", timeout=5, sudo_prompt_wait=5)
+    res = pump(ch, "wrong", timeout=5, prompt_wait=5)
     assert ch.sent == b"wrong\n"
     assert res.returncode == 1
     assert b"incorrect password" in res.stderr
     assert SUDO_PROMPT.encode() not in res.stderr
 
 
+def test_ccps_passphrase_sent_only_on_ccps_prompt():
+    # sudo never asks; the oracle shell asks for the cp993 passphrase
+    ch = FakeChannel([("out", b"PROFILE BANNER\n"), ("err", CCPS_PROMPT.encode()),
+                      ("wait_stdin", None), ("err", b"Identity added\n"),
+                      ("out", f"{MARKER}\nok\n".encode())])
+    res = pump(ch, "Login#Pw", timeout=5, prompt_wait=5, ccps_passphrase="Sample#Phrase1")
+    assert ch.sent == b"Sample#Phrase1\n"
+    assert b"Login#Pw" not in ch.sent
+    assert ch.stdin_closed
+    assert CCPS_PROMPT.encode() not in res.stderr
+
+
+def test_sudo_then_ccps_each_get_their_own_answer():
+    ch = FakeChannel([("err", SUDO_PROMPT.encode()), ("wait_stdin", None),
+                      ("err", CCPS_PROMPT.encode()), ("wait_stdin", None),
+                      ("out", f"{MARKER}\nok\n".encode())])
+    ch_waits = ch.chunks
+    pump(ch, "Login#Pw", timeout=5, prompt_wait=5, ccps_passphrase="Sample#Phrase1")
+    assert ch.sent == b"Login#Pw\nSample#Phrase1\n"
+    assert not ch_waits
+
+
+def test_repeated_ccps_prompt_closes_stdin():
+    ch = FakeChannel([("err", CCPS_PROMPT.encode()), ("wait_stdin", None),
+                      ("err", CCPS_PROMPT.encode()), ("err", b"failed\n")], exit_code=97)
+    res = pump(ch, "pw", timeout=5, prompt_wait=5, ccps_passphrase="Sample#Phrase1")
+    assert ch.sent == b"Sample#Phrase1\n"
+    assert ch.stdin_closed
+    assert res.returncode == 97
+
+
 def test_stdin_closed_if_nothing_happens():
     ch = FakeChannel([("wait_stdin", None), ("out", b"done\n")])
-    pump(ch, "pw", timeout=5, sudo_prompt_wait=0)
+    pump(ch, "pw", timeout=5, prompt_wait=0)
     assert ch.sent == b"" and ch.stdin_closed
 
 
@@ -92,4 +123,4 @@ def test_timeout():
     ch = FakeChannel([("wait_stdin", None), ("out", b"never")])
     ch.shutdown_write = lambda: None  # sudo keeps waiting
     with pytest.raises(CommandTimeout):
-        pump(ch, "pw", timeout=0, sudo_prompt_wait=100)
+        pump(ch, "pw", timeout=0, prompt_wait=100)
