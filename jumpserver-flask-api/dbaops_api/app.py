@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
@@ -11,14 +12,15 @@ from flask import Flask, g, jsonify, request
 
 from . import __version__
 from .analyze import analyze as llm_analyze
-from .auth import AuthError, SessionManager
 from .config import AppConfig, ConfigError, load_config
-from .runner import ProcessRunner, Runner
+from .runner import Runner
+from .sessions import AuthError, JumpUnavailable, LoginFailed, SessionStore, TooManyFailures
 
 log = logging.getLogger(__name__)
 audit = logging.getLogger("dbaops.audit")
 
-PUBLIC_ENDPOINTS = {"health", "create_session"}
+PUBLIC_ENDPOINTS = {"health", "login"}
+LOOPBACK = {"127.0.0.1", "::1"}
 
 
 def default_config_path() -> str:
@@ -42,13 +44,18 @@ def _setup_audit(path: Optional[str]) -> None:
     audit.propagate = False
 
 
+def _default_connector(cfg, username, password):
+    from .jumphost import JumpSession
+    return JumpSession(cfg, username, password)
+
+
 def create_app(config_path: Optional[str] = None,
-               process_runner: Optional[ProcessRunner] = None,
-               sessions: Optional[SessionManager] = None,
+               connector: Optional[Callable[..., Any]] = None,
                analyzer: Optional[Callable[..., str]] = None) -> Flask:
     cfg: AppConfig = load_config(config_path or default_config_path())
-    sessions = sessions or SessionManager.from_env(cfg.session_ttl_seconds)
-    runner = Runner(cfg, process_runner)
+    store = SessionStore(cfg.jumpserver, cfg.session_ttl_seconds, connector or _default_connector)
+    atexit.register(store.close_all)
+    runner = Runner(cfg)
     analyzer = analyzer or llm_analyze
     slots = threading.BoundedSemaphore(cfg.max_concurrent)
     _setup_audit(cfg.audit_log)
@@ -59,24 +66,28 @@ def create_app(config_path: Optional[str] = None,
     def error(status: int, message: str, **extra: Any):
         return jsonify({"error": message, **extra}), status
 
-    @app.before_request
-    def require_session():
-        if request.endpoint in PUBLIC_ENDPOINTS or request.endpoint is None:
-            return None
+    def session_token() -> Optional[str]:
         token = request.headers.get("X-Session-Token")
         auth = request.headers.get("Authorization", "")
         if not token and auth.lower().startswith("bearer "):
             token = auth[7:].strip()
+        return token
+
+    @app.before_request
+    def require_session():
+        if request.endpoint in PUBLIC_ENDPOINTS or request.endpoint is None:
+            return None
         try:
-            g.client = sessions.verify(token)
+            g.session = store.get(session_token())
         except AuthError as exc:
             return error(401, str(exc))
+        g.user = g.session.username
         return None
 
     @app.errorhandler(404)
     def not_found(_exc):
-        return error(404, "Not found. Endpoints: GET /health, POST /session, GET /scripts, "
-                          "GET /tools, POST /run")
+        return error(404, "Not found. Endpoints: GET /health, POST|GET|DELETE /session, "
+                          "GET /scripts, GET /tools, POST /run")
 
     @app.errorhandler(405)
     def bad_method(_exc):
@@ -91,17 +102,45 @@ def create_app(config_path: Optional[str] = None,
         return jsonify({"status": "ok", "version": __version__})
 
     @app.post("/session")
-    def create_session():
-        if not sessions.api_key:
-            return error(403, "POST /session is disabled because DBAOPS_API_KEY is not set. "
-                              "Mint a token on the jump server with: python3.8 -m dbaops_api token")
-        if not sessions.check_api_key(request.headers.get("X-API-Key")):
-            return error(401, "Missing or wrong X-API-Key")
-        body = request.get_json(silent=True) or {}
-        client = str(body.get("client") or "agent")
-        token, expires_at = sessions.issue(client)
-        audit_event("session", client=client)
-        return jsonify({"token": token, "expires_in": sessions.ttl, "expires_at": expires_at})
+    def login():
+        if not (cfg.jumpserver.allow_http_login or request.is_secure
+                or request.remote_addr in LOOPBACK):
+            return error(403, "Refusing to accept a password over plain HTTP. Use HTTPS "
+                              "(see README) or set jumpserver.allow_http_login.")
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return error(400, 'Body must be JSON: {"username": "...", "password": "..."}')
+        password = body.get("password")
+        try:
+            username = cfg.validate_username(body.get("username"))
+        except ConfigError as exc:
+            return error(400, str(exc))
+        if not isinstance(password, str) or not password:
+            return error(400, "'password' is required")
+        g.user = username
+        try:
+            session = store.login(username, password, request.remote_addr or "")
+        except TooManyFailures as exc:
+            audit_event("login", result="rate_limited")
+            return error(429, str(exc))
+        except LoginFailed:
+            audit_event("login", result="failed")
+            return error(401, "Invalid username or password for the jump server")
+        except JumpUnavailable as exc:
+            audit_event("login", result="jump_unavailable")
+            return error(502, str(exc))
+        audit_event("login", result="ok")
+        return jsonify(session_info(session, token=True))
+
+    @app.get("/session")
+    def whoami():
+        return jsonify(session_info(g.session))
+
+    @app.delete("/session")
+    def logout():
+        store.logout(g.session.token)
+        audit_event("logout")
+        return jsonify({"logged_out": True, "user": g.user})
 
     @app.get("/scripts")
     def list_scripts():
@@ -132,14 +171,14 @@ def create_app(config_path: Optional[str] = None,
             return error(400, "analyze=true but no LLM is configured (llm.base_url, llm.model)")
 
         if body.get("dry_run"):
-            return jsonify({"host": host, "script": script.name,
+            return jsonify({"host": host, "script": script.name, "user": g.user,
                             "command": runner.ssh_command(host, script),
                             "jump_command": runner.argv(host, script), "dry_run": True})
 
         if not slots.acquire(blocking=False):
             return error(429, f"Busy: {cfg.max_concurrent} scripts already running. Retry shortly.")
         try:
-            result = runner.run(host, script)
+            result = runner.run(g.session.conn, host, script)
         finally:
             slots.release()
 
@@ -155,6 +194,7 @@ def create_app(config_path: Optional[str] = None,
             "output": result.output,
             "stderr": result.stderr,
             "status": result.status,
+            "user": g.user,
             "duration_s": round(result.duration_s, 2),
         }
         if result.truncated:
@@ -172,11 +212,19 @@ def create_app(config_path: Optional[str] = None,
                 payload["analysis_error"] = f"{type(exc).__name__}: {exc}"
         return jsonify(payload)
 
+    def session_info(session, token: bool = False) -> dict:
+        info = {"user": session.username,
+                "expires_at": session.expires_at(store.ttl),
+                "idle_expires_at": session.idle_expires_at(store.idle),
+                "idle_timeout": store.idle}
+        if token:
+            info = {"token": session.token, **info}
+        return info
+
     def audit_event(event: str, **fields: Any) -> None:
         record = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "event": event,
-                  "client": getattr(g, "client", fields.pop("client", None)),
-                  "remote_addr": request.headers.get("X-Forwarded-For", request.remote_addr),
-                  **fields}
+                  "user": getattr(g, "user", None),
+                  "remote_addr": request.remote_addr, **fields}
         audit.info(json.dumps(record))
         log.info("%s", record)
 
@@ -185,7 +233,7 @@ def create_app(config_path: Optional[str] = None,
                 "args": s.args, "state_changing": s.state_changing,
                 "requires_confirm": s.state_changing, "timeout": cfg.timeout_for(s)}
 
-    app.extensions["dbaops"] = {"config": cfg, "runner": runner, "sessions": sessions}
+    app.extensions["dbaops"] = {"config": cfg, "runner": runner, "sessions": store}
     return app
 
 

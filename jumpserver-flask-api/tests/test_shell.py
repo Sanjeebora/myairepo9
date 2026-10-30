@@ -7,7 +7,7 @@ import subprocess
 import pytest
 
 from dbaops_api.config import load_config
-from dbaops_api.runner import Runner
+from dbaops_api.runner import Completed, Runner
 
 pytestmark = pytest.mark.skipif(
     not (shutil.which("ssh-agent") and shutil.which("ssh-keygen") and shutil.which("timeout")),
@@ -42,6 +42,28 @@ def env(tmp_path, monkeypatch):
     return tmp_path, key
 
 
+class LocalSession:
+    """Runs the jump server command with a local shell in place of an SSH login."""
+    username = "tester"
+
+    def exec(self, command, timeout):
+        proc = subprocess.run(command, shell=True, stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=timeout)
+        return Completed(proc.returncode, proc.stdout, proc.stderr)
+
+    def redact(self, text):
+        return text
+
+
+class BoundRunner:
+    def __init__(self, runner):
+        self.runner = runner
+        self.config = runner.config
+
+    def run(self, host, script):
+        return self.runner.run(LocalSession(), host, script)
+
+
 def make_runner(tmp_path, key, **overrides):
     data = {
         "become": [],
@@ -53,7 +75,7 @@ def make_runner(tmp_path, key, **overrides):
     }
     path = tmp_path / "config.json"
     path.write_text(json.dumps(data))
-    return Runner(load_config(str(path)))
+    return BoundRunner(Runner(load_config(str(path))))
 
 
 def agent_alive(tmp_path):
@@ -116,7 +138,7 @@ def test_script_timeout(env):
 
 def test_login_profile_noise_is_not_in_output(env):
     tmp_path, key = env
-    runner = make_runner(tmp_path, key)
+    runner = make_runner(tmp_path, key).runner
     runner.config.ccps = "echo 'Welcome to the jump server'; " + runner.config.ccps
     argv = runner.argv("dbprod01", runner.config.scripts["dba_checkout"])
     argv[-1] = "echo 'ORACLE_HOME banner from .bash_profile'\n" + argv[-1]

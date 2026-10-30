@@ -1,8 +1,23 @@
 {
   "_comment": "Copy to /opt/dbaops-api/config.json. Keys starting with _ are ignored.",
 
+  "jumpserver": {
+    "_comment": "People log in here over SSH with their own username and password.",
+    "host": "127.0.0.1",
+    "port": 22,
+    "known_hosts": "/opt/dbaops-api/known_hosts",
+    "connect_timeout": 15,
+    "username_pattern": "^[a-z_][a-z0-9_.-]{0,31}$",
+    "allowed_users": [],
+    "allow_http_login": false,
+    "max_login_failures": 5,
+    "login_failure_window": 600,
+    "session_idle_seconds": 1800,
+    "sudo_prompt_wait": 20
+  },
+
   "script_dir": "/dba/bin",
-  "become": ["sudo", "-n", "su", "-", "oracle", "-c"],
+  "become": ["sudo", "su", "-", "oracle", "-c"],
   "ccps": "eval `ssh-agent -s`; ssh-add ~/.ssh/cp993",
 
   "ssh_user": null,

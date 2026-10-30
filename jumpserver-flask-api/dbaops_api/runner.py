@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import logging
 import shlex
-import subprocess
 import time
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from typing import List, Optional
 
 from .config import AppConfig, ScriptConfig
 
@@ -15,9 +14,14 @@ log = logging.getLogger(__name__)
 # login-profile noise (banners, oraenv), and its absence means sudo/su/ccps never got that far.
 MARKER = "__DBAOPS_SSH_START__"
 CCPS_FAILED = "__DBAOPS_CCPS_FAILED__"
+SUDO_PROMPT = "__DBAOPS_SUDO_PASSWORD__:"
 CCPS_EXIT = 97
 TIMEOUT_EXIT = 124
 SSH_CONNECT_EXIT = 255
+
+
+class CommandTimeout(Exception):
+    pass
 
 
 @dataclass
@@ -27,19 +31,18 @@ class Completed:
     stderr: bytes
 
 
-# Injected in tests; the default runs the real command on the jump server.
-ProcessRunner = Callable[[List[str], int], Completed]
+class Session:
+    """What the runner needs from a logged-in person's jump server session."""
+    username: str
 
+    def exec(self, command: str, timeout: int) -> Completed: ...
 
-def run_process(argv: List[str], timeout: int) -> Completed:
-    proc = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, timeout=timeout)
-    return Completed(proc.returncode, proc.stdout, proc.stderr)
+    def redact(self, text: str) -> str: ...
 
 
 @dataclass
 class RunResult:
-    status: str  # ok | script_failed | ccps_failed | become_failed | ssh_failed | timeout
+    status: str  # ok | script_failed | ccps_failed | become_failed | ssh_failed | timeout | jump_failed
     exit_code: Optional[int]
     output: str
     stderr: str
@@ -54,9 +57,8 @@ class RunResult:
 
 
 class Runner:
-    def __init__(self, config: AppConfig, process_runner: Optional[ProcessRunner] = None):
+    def __init__(self, config: AppConfig):
         self.config = config
-        self.process_runner = process_runner or run_process
 
     def ssh_command(self, host: str, script: ScriptConfig) -> str:
         cfg = self.config
@@ -82,31 +84,38 @@ class Runner:
         ])
 
     def argv(self, host: str, script: ScriptConfig) -> List[str]:
+        """The command run in the person's jump server login, e.g. sudo -S -p ... su - oracle -c ..."""
         inner = self.oracle_shell(host, script)
-        if self.config.become:
-            return [*self.config.become, inner]
-        return ["/bin/sh", "-c", inner]
+        become = list(self.config.become)
+        if not become:
+            return ["/bin/sh", "-c", inner]
+        if become[0] == "sudo":
+            become[1:1] = ["-S", "-p", SUDO_PROMPT]
+        return [*become, inner]
 
-    def run(self, host: str, script: ScriptConfig) -> RunResult:
+    def command(self, host: str, script: ScriptConfig) -> str:
+        return shlex.join(self.argv(host, script))
+
+    def run(self, session: Session, host: str, script: ScriptConfig) -> RunResult:
         command = self.ssh_command(host, script)
-        argv = self.argv(host, script)
         timeout = self.config.timeout_for(script)
         started = time.monotonic()
         try:
             # The shell's own `timeout` stops ssh first; this is the backstop if sudo/su hangs.
-            proc = self.process_runner(argv, timeout + 30)
-        except subprocess.TimeoutExpired:
+            proc = session.exec(self.command(host, script), timeout + 30)
+        except CommandTimeout:
             return RunResult("timeout", None, "", "", command, time.monotonic() - started,
-                             f"No response from the jump server shell within {timeout + 30}s")
-        except OSError as exc:
-            return RunResult("become_failed", None, "", "", command, time.monotonic() - started,
-                             f"Could not start {argv[0]}: {exc}")
+                             f"No response from the jump server within {timeout + 30}s")
+        except Exception as exc:  # noqa: BLE001 - reported to the caller as a 502
+            log.warning("Jump server exec failed for %s: %s", session.username, exc)
+            return RunResult("jump_failed", None, "", "", command, time.monotonic() - started,
+                             f"Jump server session error: {exc}")
         duration = time.monotonic() - started
 
         limit = self.config.max_output_bytes
         truncated = len(proc.stdout) > limit
-        stdout = proc.stdout[:limit].decode("utf-8", errors="replace")
-        stderr = proc.stderr[-limit:].decode("utf-8", errors="replace")
+        stdout = session.redact(proc.stdout[:limit].decode("utf-8", errors="replace"))
+        stderr = session.redact(proc.stderr[-limit:].decode("utf-8", errors="replace"))
 
         pre_out, started_ssh, out = _split(stdout)
         pre_err, _, err = _split(stderr)
@@ -117,7 +126,8 @@ class Runner:
                 error = "ccps failed (ssh-agent / ssh-add ~/.ssh/cp993) as oracle on the jump server"
                 status = "ccps_failed"
             else:
-                error = "Could not switch to oracle on the jump server (sudo su - oracle)"
+                error = (f"{session.username} could not switch to oracle on the jump server "
+                         f"(sudo su - oracle)")
                 status = "become_failed"
             detail = (pre_err.replace(CCPS_FAILED, "").strip() or pre_out.strip())[-2000:]
             return RunResult(status, rc, "", detail, command, duration, f"{error}: {detail}")
