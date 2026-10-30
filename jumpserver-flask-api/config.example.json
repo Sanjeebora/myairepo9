@@ -1,0 +1,61 @@
+{
+  "_comment": "Copy to /opt/dbaops-api/config.json. Keys starting with _ are ignored.",
+
+  "script_dir": "/dba/bin",
+  "become": ["sudo", "-n", "su", "-", "oracle", "-c"],
+  "ccps": "eval `ssh-agent -s`; ssh-add ~/.ssh/cp993",
+
+  "ssh_user": null,
+  "ssh_options": [
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=10",
+    "-o", "ServerAliveInterval=30",
+    "-o", "StrictHostKeyChecking=yes"
+  ],
+
+  "_host_pattern": "Tighten this to your naming standard, e.g. ^db[a-z0-9-]+(\\.corp\\.example\\.com)?$",
+  "host_pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\\.[A-Za-z0-9-]{1,63})*$",
+  "allowed_hosts": [],
+
+  "default_timeout": 600,
+  "max_concurrent": 4,
+  "max_output_bytes": 2000000,
+  "session_ttl_seconds": 28800,
+  "audit_log": "/var/log/dbaops-api/audit.log",
+
+  "scripts": {
+    "dba_checkout": {
+      "file": "dba_checkout",
+      "description": "Full database health checkout (instances, listeners, tablespaces, alert log)"
+    },
+    "showsid": {
+      "file": "showsid",
+      "description": "List Oracle SIDs running on the host"
+    },
+    "showusers": {
+      "file": "showusers",
+      "description": "Show connected database users"
+    },
+    "start_oracle": {
+      "file": "start_oracle",
+      "description": "Start Oracle instances and listeners",
+      "state_changing": true,
+      "timeout": 900
+    },
+    "maint_mode": {
+      "file": "maint_mode.sh",
+      "args": ["-s"],
+      "description": "Put the host into maintenance mode",
+      "state_changing": true
+    }
+  },
+
+  "llm": {
+    "_comment": "Only used when a /run request sends analyze=true. Leave base_url empty to disable.",
+    "base_url": "",
+    "model": "",
+    "api_key_env": "LLM_API_KEY",
+    "timeout": 120,
+    "max_chars": 20000
+  }
+}

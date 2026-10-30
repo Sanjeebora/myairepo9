@@ -1,0 +1,24 @@
+[Unit]
+Description=DBA ops API (Flask) - runs /dba/bin scripts on DB servers via ccps
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dbaops
+Group=dbaops
+WorkingDirectory=/opt/dbaops-api
+EnvironmentFile=/etc/dbaops-api/dbaops.env
+# --timeout must be longer than the longest script timeout in config.json (+30s).
+# For HTTPS add: --certfile /etc/dbaops-api/tls.crt --keyfile /etc/dbaops-api/tls.key
+ExecStart=/opt/dbaops-api/venv/bin/gunicorn \
+    --workers 2 --worker-class gthread --threads 4 \
+    --bind 0.0.0.0:8080 --timeout 960 --graceful-timeout 30 \
+    --access-logfile - --error-logfile - \
+    wsgi:app
+Restart=on-failure
+RestartSec=5
+# Do not add NoNewPrivileges=yes: it stops sudo from working.
+
+[Install]
+WantedBy=multi-user.target

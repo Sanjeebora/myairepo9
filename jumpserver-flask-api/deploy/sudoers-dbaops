@@ -1,0 +1,4 @@
+# Install with:  visudo -cf ./sudoers-dbaops && install -m 440 -o root -g root ./sudoers-dbaops /etc/sudoers.d/dbaops
+# Lets the service account run "sudo su - oracle -c <command>" without a password or a TTY.
+Defaults:dbaops !requiretty
+dbaops ALL=(root) NOPASSWD: /bin/su - oracle -c *, /usr/bin/su - oracle -c *
