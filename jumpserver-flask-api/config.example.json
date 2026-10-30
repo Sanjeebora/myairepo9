@@ -1,0 +1,78 @@
+{
+  "_comment": "Copy to /opt/dbaops-api/config.json. Keys starting with _ are ignored.",
+
+  "jumpserver": {
+    "_comment": "People log in here over SSH with their own username and password.",
+    "host": "127.0.0.1",
+    "port": 22,
+    "known_hosts": "/opt/dbaops-api/known_hosts",
+    "connect_timeout": 15,
+    "username_pattern": "^[a-z_][a-z0-9_.-]{0,31}$",
+    "allowed_users": [],
+    "allow_http_login": false,
+    "max_login_failures": 5,
+    "login_failure_window": 600,
+    "session_idle_seconds": 1800,
+    "sudo_prompt_wait": 20
+  },
+
+  "script_dir": "/dba/bin",
+  "become": ["sudo", "su", "-", "oracle", "-c"],
+  "ccps": "eval `ssh-agent -s`; ssh-add ~/.ssh/cp993",
+  "_ccps_passphrase_env": "ssh-add's passphrase is read from this environment variable (set in /etc/dbaops-api/dbaops.env)",
+  "ccps_passphrase_env": "CCPS_PASSPHRASE",
+
+  "ssh_user": null,
+  "ssh_options": [
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=10",
+    "-o", "ServerAliveInterval=30",
+    "-o", "StrictHostKeyChecking=yes"
+  ],
+
+  "_host_pattern": "Tighten this to your naming standard, e.g. ^db[a-z0-9-]+(\\.corp\\.example\\.com)?$",
+  "host_pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\\.[A-Za-z0-9-]{1,63})*$",
+  "allowed_hosts": [],
+
+  "default_timeout": 600,
+  "max_concurrent": 4,
+  "max_output_bytes": 2000000,
+  "session_ttl_seconds": 28800,
+  "audit_log": "/var/log/dbaops-api/audit.log",
+
+  "scripts": {
+    "dba_checkout": {
+      "file": "dba_checkout",
+      "description": "Full database health checkout (instances, listeners, tablespaces, alert log)"
+    },
+    "showsid": {
+      "file": "showsid",
+      "description": "List Oracle SIDs running on the host"
+    },
+    "showusers": {
+      "file": "showusers",
+      "description": "Show connected database users"
+    },
+    "start_oracle": {
+      "file": "start_oracle",
+      "description": "Start Oracle instances and listeners",
+      "state_changing": true,
+      "timeout": 900
+    },
+    "maint_mode": {
+      "file": "maint_mode.sh",
+      "args": ["-s"],
+      "description": "Put the host into maintenance mode",
+      "state_changing": true
+    }
+  },
+
+  "llm": {
+    "_comment": "Only used when a /run request sends analyze=true. Leave base_url empty to disable.",
+    "base_url": "",
+    "model": "",
+    "api_key_env": "LLM_API_KEY",
+    "timeout": 120,
+    "max_chars": 20000
+  }
+}
