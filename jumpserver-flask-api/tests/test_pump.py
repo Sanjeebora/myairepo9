@@ -87,7 +87,7 @@ def test_ccps_passphrase_sent_only_on_ccps_prompt():
     ch = FakeChannel([("out", b"PROFILE BANNER\n"), ("err", CCPS_PROMPT.encode()),
                       ("wait_stdin", None), ("err", b"Identity added\n"),
                       ("out", f"{MARKER}\nok\n".encode())])
-    res = pump(ch, "Login#Pw", timeout=5, prompt_wait=5, ccps_passphrase="Sample#Phrase1")
+    res = pump(ch, "Login#Pw", timeout=5, prompt_wait=5, ccps_secret="Sample#Phrase1")
     assert ch.sent == b"Sample#Phrase1\n"
     assert b"Login#Pw" not in ch.sent
     assert ch.stdin_closed
@@ -99,7 +99,7 @@ def test_sudo_then_ccps_each_get_their_own_answer():
                       ("err", CCPS_PROMPT.encode()), ("wait_stdin", None),
                       ("out", f"{MARKER}\nok\n".encode())])
     ch_waits = ch.chunks
-    pump(ch, "Login#Pw", timeout=5, prompt_wait=5, ccps_passphrase="Sample#Phrase1")
+    pump(ch, "Login#Pw", timeout=5, prompt_wait=5, ccps_secret="Sample#Phrase1")
     assert ch.sent == b"Login#Pw\nSample#Phrase1\n"
     assert not ch_waits
 
@@ -107,7 +107,7 @@ def test_sudo_then_ccps_each_get_their_own_answer():
 def test_repeated_ccps_prompt_closes_stdin():
     ch = FakeChannel([("err", CCPS_PROMPT.encode()), ("wait_stdin", None),
                       ("err", CCPS_PROMPT.encode()), ("err", b"failed\n")], exit_code=97)
-    res = pump(ch, "pw", timeout=5, prompt_wait=5, ccps_passphrase="Sample#Phrase1")
+    res = pump(ch, "pw", timeout=5, prompt_wait=5, ccps_secret="Sample#Phrase1")
     assert ch.sent == b"Sample#Phrase1\n"
     assert ch.stdin_closed
     assert res.returncode == 97

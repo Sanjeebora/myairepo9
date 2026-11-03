@@ -1,26 +1,29 @@
-from __future__ import annotations
-
 import logging
 import socket
 import threading
 import time
 import warnings
 from pathlib import Path
-from typing import Optional
 
 with warnings.catch_warnings():
-    # cryptography warns that Python 3.8 support is deprecated; it still works.
+    # Keep third-party deprecation warnings out of service logs.
     warnings.simplefilter("ignore")
     import paramiko
 
-from .config import JumpConfig
 from .runner import CCPS_PROMPT, MARKER, SUDO_PROMPT, CommandTimeout, Completed
-from .sessions import JumpUnavailable, LoginFailed
 
 log = logging.getLogger(__name__)
 
 
-def connect(cfg: JumpConfig, username: str, password: str) -> paramiko.SSHClient:
+class LoginFailed(Exception):
+    pass
+
+
+class JumpUnavailable(Exception):
+    pass
+
+
+def connect(cfg, username, password):
     client = paramiko.SSHClient()
     client.load_system_host_keys()
     known = Path(cfg.known_hosts).expanduser()
@@ -29,9 +32,10 @@ def connect(cfg: JumpConfig, username: str, password: str) -> paramiko.SSHClient
     client.set_missing_host_key_policy(paramiko.RejectPolicy())
     try:
         # password auth falls back to keyboard-interactive, which PAM-only sshd setups use.
-        client.connect(hostname=cfg.host, port=cfg.port, username=username, password=password,
-                       timeout=cfg.connect_timeout, banner_timeout=cfg.connect_timeout,
-                       auth_timeout=cfg.connect_timeout, look_for_keys=False, allow_agent=False)
+        client.connect(hostname=cfg.jump_host, port=cfg.jump_port, username=username,
+                       password=password, timeout=cfg.connect_timeout,
+                       banner_timeout=cfg.connect_timeout, auth_timeout=cfg.connect_timeout,
+                       look_for_keys=False, allow_agent=False)
     except paramiko.AuthenticationException:
         client.close()
         raise LoginFailed("Invalid username or password")
@@ -39,31 +43,33 @@ def connect(cfg: JumpConfig, username: str, password: str) -> paramiko.SSHClient
         client.close()
         if "not found in known_hosts" in str(exc):
             raise JumpUnavailable(
-                f"The jump server host key for {cfg.host} is not in {cfg.known_hosts}. "
-                f"Add it with: ssh-keyscan -p {cfg.port} {cfg.host} >> {cfg.known_hosts}")
-        raise JumpUnavailable(f"SSH to {cfg.host}:{cfg.port} failed: {exc}")
+                "The jump server host key for %s is not in %s" % (
+                    cfg.jump_host, cfg.known_hosts))
+        raise JumpUnavailable("SSH handshake to the configured jump server failed")
     except (socket.error, OSError) as exc:
         client.close()
-        raise JumpUnavailable(f"Cannot connect to {cfg.host}:{cfg.port}: {exc}")
+        raise JumpUnavailable("Cannot connect to %s:%s" % (cfg.jump_host, cfg.jump_port))
     transport = client.get_transport()
     if transport is not None:
         transport.set_keepalive(30)
     return client
 
 
-def pump(channel, password: str, timeout: int, prompt_wait: int,
-         ccps_passphrase: Optional[str] = None) -> Completed:
+def pump(channel, password, timeout, prompt_wait, ccps_secret=None,
+         output_limit=1114112):
     """Read a running command's output and answer each known prompt once.
 
-    sudo's prompt gets the person's password; the oracle shell's ccps prompt gets the cp993
-    passphrase. Each answer is sent only when its own prompt appears. stdin is closed once the
-    marker shows ssh is starting, when a prompt repeats (wrong answer), or after prompt_wait
+    sudo's prompt gets the person's password; the oracle shell's ccps prompt gets the configured
+    ccps secret. Each answer is sent only when its own prompt appears. stdin is closed once the
+    marker shows the script is starting, when a prompt repeats (wrong answer), or after prompt_wait
     seconds without a prompt, so nothing can hang waiting for input.
     """
     answers = {SUDO_PROMPT.encode(): password,
-               CCPS_PROMPT.encode(): ccps_passphrase or ""}
+               CCPS_PROMPT.encode(): ccps_secret or ""}
     marker = MARKER.encode()
     out, err = bytearray(), bytearray()
+    out_cut = False
+    err_cut = False
     started = time.monotonic()
     deadline = started + timeout
     last_prompt = started
@@ -72,10 +78,18 @@ def pump(channel, password: str, timeout: int, prompt_wait: int,
     while True:
         progressed = False
         while channel.recv_ready():
-            out += channel.recv(65536)
+            chunk = channel.recv(65536)
+            remaining = output_limit - len(out)
+            if remaining > 0:
+                out += chunk[:remaining]
+            out_cut = out_cut or len(chunk) > max(remaining, 0)
             progressed = True
         while channel.recv_stderr_ready():
-            err += channel.recv_stderr(65536)
+            chunk = channel.recv_stderr(65536)
+            remaining = output_limit - len(err)
+            if remaining > 0:
+                err += chunk[:remaining]
+            err_cut = err_cut or len(chunk) > max(remaining, 0)
             progressed = True
         if stdin_open:
             for prompt, answer in answers.items():
@@ -100,18 +114,18 @@ def pump(channel, password: str, timeout: int, prompt_wait: int,
             time.sleep(0.05)
     for prompt in answers:
         err = err.replace(prompt, b"")
-    return Completed(channel.recv_exit_status(), bytes(out), bytes(err))
+    return Completed(channel.recv_exit_status(), bytes(out), bytes(err), out_cut, err_cut)
 
 
 class JumpSession:
     """One person's SSH login to the jump server, reused by all of their /run requests."""
 
-    def __init__(self, cfg: JumpConfig, username: str, password: str):
+    def __init__(self, cfg, username, password):
         self.cfg = cfg
         self.username = username
         self._password = password
         self._lock = threading.Lock()
-        self._client: Optional[paramiko.SSHClient] = connect(cfg, username, password)
+        self._client = connect(cfg, username, password)
 
     def _transport(self):
         with self._lock:
@@ -124,22 +138,21 @@ class JumpSession:
                 transport = self._client.get_transport()
             return transport
 
-    def exec(self, command: str, timeout: int,
-             ccps_passphrase: Optional[str] = None) -> Completed:
+    def exec(self, command, timeout, ccps_secret=None):
         channel = self._transport().open_session(timeout=self.cfg.connect_timeout)
         try:
             channel.exec_command(command)
-            return pump(channel, self._password, timeout, self.cfg.sudo_prompt_wait,
-                        ccps_passphrase)
+            return pump(channel, self._password, timeout, 20, ccps_secret,
+                        self.cfg.max_output_bytes + 65536)
         finally:
             channel.close()
 
-    def redact(self, text: str) -> str:
-        if len(self._password) >= 4:
+    def redact(self, text):
+        if self._password:
             return text.replace(self._password, "********")
         return text
 
-    def close(self) -> None:
+    def close(self):
         with self._lock:
             if self._client:
                 self._client.close()

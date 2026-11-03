@@ -1,33 +1,27 @@
-from __future__ import annotations
-
-import atexit
+import hmac
 import json
 import logging
 import os
 import threading
 import time
-from typing import Any, Callable, Optional
-
-from flask import Flask, g, jsonify, request
+from flask import Flask, jsonify, request
 
 from . import __version__
-from .analyze import analyze as llm_analyze
-from .config import AppConfig, ConfigError, load_config
+from .config import ConfigError, JUMP_HOST, load_config
+from .jumphost import JumpSession, JumpUnavailable, LoginFailed
 from .runner import Runner
-from .sessions import AuthError, JumpUnavailable, LoginFailed, SessionStore, TooManyFailures
 
 log = logging.getLogger(__name__)
 audit = logging.getLogger("dbaops.audit")
 
-PUBLIC_ENDPOINTS = {"health", "login"}
 LOOPBACK = {"127.0.0.1", "::1"}
 
 
-def default_config_path() -> str:
+def default_config_path():
     return os.environ.get("DBAOPS_CONFIG", "config.json")
 
 
-def _setup_audit(path: Optional[str]) -> None:
+def _setup_audit(path):
     if not path:
         return
     path = os.path.abspath(path)
@@ -44,50 +38,44 @@ def _setup_audit(path: Optional[str]) -> None:
     audit.propagate = False
 
 
-def _default_connector(cfg, username, password):
-    from .jumphost import JumpSession
-    return JumpSession(cfg, username, password)
-
-
-def create_app(config_path: Optional[str] = None,
-               connector: Optional[Callable[..., Any]] = None,
-               analyzer: Optional[Callable[..., str]] = None) -> Flask:
-    cfg: AppConfig = load_config(config_path or default_config_path())
-    store = SessionStore(cfg.jumpserver, cfg.session_ttl_seconds, connector or _default_connector)
-    atexit.register(store.close_all)
+def create_app(config_path=None, connector=None):
+    cfg = load_config(config_path or default_config_path())
+    cfg.validate_secrets()
     runner = Runner(cfg)
-    analyzer = analyzer or llm_analyze
+    connector = connector or JumpSession
     slots = threading.BoundedSemaphore(cfg.max_concurrent)
     _setup_audit(cfg.audit_log)
 
     app = Flask(__name__)
-    app.json.sort_keys = False  # keep host, script, command, exit_code, output in order
+    app.config["JSON_SORT_KEYS"] = False
+    app.config["MAX_CONTENT_LENGTH"] = 16384
 
-    def error(status: int, message: str, **extra: Any):
-        return jsonify({"error": message, **extra}), status
+    def error(status, message, **extra):
+        payload = {"error": message}
+        payload.update(extra)
+        return jsonify(payload), status
 
-    def session_token() -> Optional[str]:
-        token = request.headers.get("X-Session-Token")
-        auth = request.headers.get("Authorization", "")
-        if not token and auth.lower().startswith("bearer "):
-            token = auth[7:].strip()
-        return token
+    def secure_transport():
+        if request.is_secure:
+            return True
+        return (request.remote_addr in LOOPBACK and
+                request.headers.get("X-Forwarded-Proto", "").lower() == "https")
 
     @app.before_request
-    def require_session():
-        if request.endpoint in PUBLIC_ENDPOINTS or request.endpoint is None:
+    def authenticate():
+        if request.endpoint == "health" or request.endpoint is None:
             return None
-        try:
-            g.session = store.get(session_token())
-        except AuthError as exc:
-            return error(401, str(exc))
-        g.user = g.session.username
+        supplied = request.headers.get("X-Token", "")
+        expected = cfg.api_token
+        if not supplied or not hmac.compare_digest(
+                supplied.encode("utf-8"), expected.encode("utf-8")):
+            audit_event("authentication", result="rejected")
+            return error(401, "Missing or invalid X-Token")
         return None
 
     @app.errorhandler(404)
     def not_found(_exc):
-        return error(404, "Not found. Endpoints: GET /health, POST|GET|DELETE /session, "
-                          "GET /scripts, GET /tools, POST /run")
+        return error(404, "Not found. Endpoints: GET /health, GET /scripts, POST /run")
 
     @app.errorhandler(405)
     def bad_method(_exc):
@@ -97,104 +85,68 @@ def create_app(config_path: Optional[str] = None,
     def internal(_exc):
         return error(500, "Internal error; see the service log on the jump server")
 
-    @app.get("/health")
+    @app.route("/health", methods=["GET"])
     def health():
         return jsonify({"status": "ok", "version": __version__})
 
-    @app.post("/session")
-    def login():
-        if not (cfg.jumpserver.allow_http_login or request.is_secure
-                or request.remote_addr in LOOPBACK):
-            return error(403, "Refusing to accept a password over plain HTTP. Use HTTPS "
-                              "(see README) or set jumpserver.allow_http_login.")
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return error(400, 'Body must be JSON: {"username": "...", "password": "..."}')
-        password = body.get("password")
-        try:
-            username = cfg.validate_username(body.get("username"))
-        except ConfigError as exc:
-            return error(400, str(exc))
-        if not isinstance(password, str) or not password:
-            return error(400, "'password' is required")
-        g.user = username
-        try:
-            session = store.login(username, password, request.remote_addr or "")
-        except TooManyFailures as exc:
-            audit_event("login", result="rate_limited")
-            return error(429, str(exc))
-        except LoginFailed:
-            audit_event("login", result="failed")
-            return error(401, "Invalid username or password for the jump server")
-        except JumpUnavailable as exc:
-            audit_event("login", result="jump_unavailable")
-            return error(502, str(exc))
-        audit_event("login", result="ok")
-        return jsonify(session_info(session, token=True))
-
-    @app.get("/session")
-    def whoami():
-        return jsonify(session_info(g.session))
-
-    @app.delete("/session")
-    def logout():
-        store.logout(g.session.token)
-        audit_event("logout")
-        return jsonify({"logged_out": True, "user": g.user})
-
-    @app.get("/scripts")
+    @app.route("/scripts", methods=["GET"])
     def list_scripts():
         return jsonify({"scripts": [script_info(s) for s in cfg.scripts.values()]})
 
-    @app.get("/tools")
-    def tools():
-        return jsonify({"tools": [tool_definition(cfg)]})
-
-    @app.post("/run")
+    @app.route("/run", methods=["POST"])
     def run():
+        if not (secure_transport() or cfg.allow_insecure_http):
+            return error(403, "Credentials are accepted only over HTTPS")
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
             return error(400, "Body must be a JSON object with Content-Type: application/json")
+        unknown = set(body) - {"username", "password", "script", "confirm"}
+        if unknown:
+            return error(400, "Unknown request field(s): %s" % ", ".join(sorted(unknown)))
         try:
-            host = cfg.validate_host(body.get("host"))
+            username = cfg.validate_username(body.get("username"))
             script = cfg.get_script(body.get("script"))
         except ConfigError as exc:
             return error(400, str(exc))
-        for flag in ("confirm", "analyze", "dry_run"):
-            if flag in body and not isinstance(body[flag], bool):
-                return error(400, f"'{flag}' must be true or false")
+        password = body.get("password")
+        if not isinstance(password, str) or not password or len(password) > 1024:
+            return error(400, "'password' is required and must be at most 1024 characters")
+        if "confirm" in body and not isinstance(body["confirm"], bool):
+            return error(400, "'confirm' must be true or false")
         if script.state_changing and body.get("confirm") is not True:
-            return error(409, f"'{script.name}' changes state on {host}. "
-                              "Resend with \"confirm\": true to run it.",
-                         host=host, script=script.name)
-        if body.get("analyze") and not cfg.llm.enabled:
-            return error(400, "analyze=true but no LLM is configured (llm.base_url, llm.model)")
-
-        if body.get("dry_run"):
-            return jsonify({"host": host, "script": script.name, "user": g.user,
-                            "command": runner.ssh_command(host, script),
-                            "jump_command": runner.argv(host, script), "dry_run": True})
+            return error(409, "'%s' changes state; resend with confirm=true" % script.name,
+                         script=script.name)
 
         if not slots.acquire(blocking=False):
-            return error(429, f"Busy: {cfg.max_concurrent} scripts already running. Retry shortly.")
+            return error(429, "Maximum concurrent operations reached")
+        session = None
         try:
-            result = runner.run(g.session.conn, host, script)
+            session = connector(cfg, username, password)
+            result = runner.run(session, script)
+        except LoginFailed:
+            audit_event("run", user=username, script=script.name, status="login_failed")
+            return error(401, "Jump-server credentials were rejected")
+        except JumpUnavailable as exc:
+            audit_event("run", user=username, script=script.name, status="jump_unavailable")
+            return error(502, str(exc), status="jump_unavailable")
         finally:
+            if session is not None:
+                session.close()
             slots.release()
 
-        audit_event("run", host=host, script=script.name, status=result.status,
+        audit_event("run", user=username, script=script.name, status=result.status,
                     exit_code=result.exit_code, duration_s=round(result.duration_s, 2),
                     confirm=bool(body.get("confirm")))
 
         payload = {
-            "host": host,
+            "jump_host": JUMP_HOST,
             "script": script.name,
             "command": result.command,
             "exit_code": result.exit_code,
             "output": result.output,
             "stderr": result.stderr,
             "status": result.status,
-            "user": g.user,
+            "user": username,
             "duration_s": round(result.duration_s, 2),
         }
         if result.truncated:
@@ -203,63 +155,18 @@ def create_app(config_path: Optional[str] = None,
             payload["error"] = result.error
             return jsonify(payload), 502
 
-        if body.get("analyze"):
-            try:
-                payload["analysis"] = analyzer(cfg.llm, host, script.name,
-                                               result.exit_code, result.output)
-            except Exception as exc:  # noqa: BLE001 - the script output is still useful
-                log.warning("LLM analysis failed: %s", exc)
-                payload["analysis_error"] = f"{type(exc).__name__}: {exc}"
         return jsonify(payload)
 
-    def session_info(session, token: bool = False) -> dict:
-        info = {"user": session.username,
-                "expires_at": session.expires_at(store.ttl),
-                "idle_expires_at": session.idle_expires_at(store.idle),
-                "idle_timeout": store.idle}
-        if token:
-            info = {"token": session.token, **info}
-        return info
-
-    def audit_event(event: str, **fields: Any) -> None:
+    def audit_event(event, **fields):
         record = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "event": event,
-                  "user": getattr(g, "user", None),
-                  "remote_addr": request.remote_addr, **fields}
+                  "remote_addr": request.remote_addr}
+        record.update(fields)
         audit.info(json.dumps(record))
-        log.info("%s", record)
+        log.info("audit event=%s result=%s", event, fields.get("status", fields.get("result")))
 
     def script_info(s) -> dict:
         return {"name": s.name, "description": s.description, "path": cfg.script_path(s),
-                "args": s.args, "state_changing": s.state_changing,
                 "requires_confirm": s.state_changing, "timeout": cfg.timeout_for(s)}
 
-    app.extensions["dbaops"] = {"config": cfg, "runner": runner, "sessions": store}
+    app.extensions["dbaops"] = {"config": cfg, "runner": runner}
     return app
-
-
-def tool_definition(cfg: AppConfig) -> dict:
-    """An OpenAI-style function tool the agent harness can hand straight to its LLM."""
-    lines = [f"- {s.name}: {s.description or s.file}"
-             + (" (STATE-CHANGING: needs confirm=true and human approval)" if s.state_changing else "")
-             for s in cfg.scripts.values()]
-    return {
-        "type": "function",
-        "function": {
-            "name": "run_dba_script",
-            "description": ("Run an allow-listed script from /dba/bin on an Oracle database server "
-                            "through the jump server and return its raw output.\nScripts:\n"
-                            + "\n".join(lines)),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "host": {"type": "string", "description": "Target DB server hostname",
-                             "pattern": cfg.host_pattern},
-                    "script": {"type": "string", "enum": sorted(cfg.scripts)},
-                    "confirm": {"type": "boolean", "default": False,
-                                "description": "Must be true for state-changing scripts"},
-                },
-                "required": ["host", "script"],
-                "additionalProperties": False,
-            },
-        },
-    }
