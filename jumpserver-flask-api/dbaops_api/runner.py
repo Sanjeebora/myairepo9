@@ -6,10 +6,10 @@ log = logging.getLogger(__name__)
 
 MARKER = "__DBAOPS_SCRIPT_START__"
 CCPS_FAILED = "__DBAOPS_CCPS_FAILED__"
-SUDO_PROMPT = "__DBAOPS_SUDO_PASSWORD__:"
 CCPS_PROMPT = "__DBAOPS_CCPS_SECRET__:"
 CCPS_EXIT = 97
 TIMEOUT_EXIT = 124
+SSH_EXIT = 255
 
 
 class CommandTimeout(Exception):
@@ -50,8 +50,29 @@ class Runner:
     def script_command(self, script):
         return self.config.script_path(script)
 
-    def oracle_shell(self, script):
-        """POSIX shell run by oracle: authenticate ccps, then execute one fixed script."""
+    def ssh_argv(self, target, script):
+        argv = [
+            "ssh",
+            "-p", str(target.port),
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=%s" % self.config.target_connect_timeout,
+            "-o", "ServerAliveInterval=30",
+            "-o", "StrictHostKeyChecking=yes",
+            "-o", "UserKnownHostsFile=%s" % self.config.target_known_hosts,
+        ]
+        if target.host_key_alias:
+            argv += ["-o", "HostKeyAlias=%s" % target.host_key_alias]
+        return argv + [
+            "--",
+            target.connect_host,
+            self.script_command(script),
+        ]
+
+    def ssh_command(self, target, script):
+        return shell_join(self.ssh_argv(target, script))
+
+    def oracle_shell(self, target, script):
+        """Authenticate ccps locally as oracle, then SSH to one validated target."""
         timeout = script.timeout
         lines = [
             "trap 'unset DBAOPS_CCPS_SECRET' EXIT",
@@ -63,52 +84,50 @@ class Runner:
             "unset DBAOPS_CCPS_SECRET",
             "echo %s; echo %s >&2" % (MARKER, MARKER),
             "timeout --signal=TERM --kill-after=10s %s %s </dev/null" % (
-                timeout, shlex.quote(self.script_command(script))),
+                timeout, self.ssh_command(target, script)),
         ]
         return "\n".join(lines)
 
-    def argv(self, script):
-        return ["sudo", "-S", "-p", SUDO_PROMPT, "su", "-", "oracle", "-c",
-                self.oracle_shell(script)]
+    def argv(self, target, script):
+        return ["sudo", "-n", "su", "-", "oracle", "-c",
+                self.oracle_shell(target, script)]
 
-    def command(self, script):
-        return shell_join(self.argv(script))
+    def command(self, target, script):
+        return shell_join(self.argv(target, script))
 
-    def run(self, session, script):
-        command = self.script_command(script)
+    def run(self, executor, target, script):
+        command = self.ssh_command(target, script)
         timeout = script.timeout
         started = time.monotonic()
         try:
-            proc = session.exec(self.command(script), timeout + 30,
-                                ccps_secret=self.config.ccps_secret)
+            proc = executor.exec(
+                self.argv(target, script), timeout + 30, self.config.ccps_secret)
         except CommandTimeout:
             return RunResult("timeout", None, "", "", command, time.monotonic() - started,
-                             "No response from the jump server within %ss" % (timeout + 30))
+                             "Local operation did not finish within %ss" % (timeout + 30))
         except Exception as exc:
-            log.warning("Jump server execution failed for user %s: %s",
-                        session.username, type(exc).__name__)
+            log.warning("Local jump-server execution failed: %s", type(exc).__name__)
             return RunResult("jump_failed", None, "", "", command, time.monotonic() - started,
-                             "Jump server session failed")
+                             "Local jump-server execution failed")
         duration = time.monotonic() - started
 
         limit = self.config.max_output_bytes
-        stdout = self._redact(session, proc.stdout.decode("utf-8", errors="replace"))
-        stderr = self._redact(session, proc.stderr.decode("utf-8", errors="replace"))
+        stdout = self._redact(proc.stdout.decode("utf-8", errors="replace"))
+        stderr = self._redact(proc.stderr.decode("utf-8", errors="replace"))
 
-        pre_out, started_ssh, out = _split(stdout)
+        pre_out, started_script, out = _split(stdout)
         pre_err, _, err = _split(stderr)
         out, out_cut = _limit_utf8(out, limit)
         err, err_cut = _limit_utf8(err, limit)
         truncated = (proc.stdout_truncated or proc.stderr_truncated or out_cut or err_cut)
         rc = proc.returncode
 
-        if not started_ssh:
+        if not started_script:
             if rc == CCPS_EXIT or CCPS_FAILED in stderr:
-                error = "ccps authentication failed as oracle on the jump server"
+                error = "ccps authentication failed locally as oracle"
                 status = "ccps_failed"
             else:
-                error = ("%s could not switch to oracle on the jump server "
-                         "(sudo su - oracle)" % session.username)
+                error = "The service could not run sudo su - oracle"
                 status = "become_failed"
             detail = (pre_err.replace(CCPS_FAILED, "").strip() or pre_out.strip())[-2000:]
             return RunResult(status, rc, "", detail, command, duration,
@@ -117,12 +136,16 @@ class Runner:
         if rc == TIMEOUT_EXIT:
             return RunResult("timeout", rc, out, err, command, duration,
                              "Script did not finish within %ss" % timeout, truncated)
+        if rc == SSH_EXIT:
+            return RunResult(
+                "ssh_failed", rc, out, err, command, duration,
+                "SSH to target failed: %s" % err.strip()[-2000:], truncated)
         status = "ok" if rc == 0 else "script_failed"
         return RunResult(status, rc, out, err, command, duration, None, truncated)
 
 
-    def _redact(self, session, text):
-        text = session.redact(text).replace(CCPS_PROMPT, "")
+    def _redact(self, text):
+        text = text.replace(CCPS_PROMPT, "")
         secret = self.config.ccps_secret
         if secret:
             text = text.replace(secret, "********")

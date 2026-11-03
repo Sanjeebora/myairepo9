@@ -1,9 +1,12 @@
 {
   "_comment": "Copy to /etc/dbaops-api/config.json. Secrets belong in dbaops.env, never here.",
-  "jump_host": "10.17.34.78",
-  "jump_port": 22,
-  "known_hosts": "/opt/dbaops-api/known_hosts",
-  "connect_timeout": 15,
+  "actual_jump_host": "10.17.66.19",
+  "target_known_hosts": "/etc/dbaops-api/target_known_hosts",
+  "target_connect_timeout": 10,
+  "_target_policy": "Replace these examples with the narrowest approved hostnames/CIDRs. At least one host or CIDR is required.",
+  "target_allowed_hosts": ["dbprod01.example.internal"],
+  "target_allowed_cidrs": ["10.20.0.0/16"],
+  "target_allowed_ports": [22],
   "command_timeout": 600,
   "script_dir": "/dba/bin",
   "ccps_command": "ccps",
@@ -12,6 +15,8 @@
   "max_concurrent": 4,
   "max_output_bytes": 1048576,
   "audit_log": "/var/log/dbaops-api/audit.log",
-  "_allow_insecure_http": "Test-only escape hatch. Keep false in production.",
-  "allow_insecure_http": false
+  "_trusted_proxy_cidrs": "Replace with BIG-IP self/SNAT addresses before enabling TLS offload and X-Forwarded-Proto.",
+  "trusted_proxy_cidrs": ["10.17.34.78/32"],
+  "_allow_insecure_http": "VIP 10.17.34.78:80 is plaintext, so this must be true for that mapping. Prefer BIG-IP TLS on :443, then set false.",
+  "allow_insecure_http": true
 }

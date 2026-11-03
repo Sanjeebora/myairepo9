@@ -34,7 +34,7 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="cmd")
 
     serve = sub.add_parser("serve", help="run the API with Flask's threaded server (testing)")
-    serve.add_argument("--host", default=os.environ.get("DBAOPS_BIND", "127.0.0.1"))
+    serve.add_argument("--host", default=os.environ.get("DBAOPS_BIND", "0.0.0.0"))
     serve.add_argument("--port", type=int, default=int(os.environ.get("DBAOPS_PORT", "8080")))
 
     sub.add_parser("check", help="validate config.json")
@@ -55,8 +55,11 @@ def main(argv=None):
     if args.cmd == "check":
         print(f"Config OK: {args.config}")
         print(f"Scripts: {', '.join(cfg.scripts)}")
-        print(f"Jump host: {cfg.jump_host}:{cfg.jump_port}")
-        print(f"Known hosts: {cfg.known_hosts}")
+        print(f"Actual jump host: {cfg.actual_jump_host}:8080")
+        print(f"Target known hosts: {cfg.target_known_hosts}")
+        print(f"Allowed target hosts: {len(cfg.target_allowed_hosts)}")
+        print(f"Allowed target CIDRs: {len(cfg.target_allowed_cidrs)}")
+        print(f"Allowed target ports: {cfg.target_allowed_ports}")
         print(f"API token ({cfg.api_token_env}): {'set' if cfg.api_token else 'NOT SET'}")
         print(f"ccps secret ({cfg.ccps_secret_env}): {'set' if cfg.ccps_secret else 'NOT SET'}")
         cfg.validate_secrets()
@@ -66,8 +69,9 @@ def main(argv=None):
         from .app import create_app
         app = create_app(args.config)
         if args.host not in {"127.0.0.1", "localhost"}:
-            logging.warning("Listening on %s:%s over plain HTTP. Use gunicorn with TLS for real use.",
-                            args.host, args.port)
+            logging.warning(
+                "Listening on %s:%s over HTTP. BIG-IP must restrict sources; "
+                "prefer a TLS client-side profile.", args.host, args.port)
         app.run(host=args.host, port=args.port, threaded=True, use_reloader=False)
         return 0
 

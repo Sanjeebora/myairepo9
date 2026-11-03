@@ -1,14 +1,13 @@
 """Client for the agent harness host. Standard library only; Python 3.6+.
 
-Each person logs in with their own jump server username and password:
+The harness supplies a target host and port; ccps supplies target authentication:
 
-    export DBAOPS_URL=https://jumpserver.example.com:8443
+    export DBAOPS_URL=http://10.17.34.78
     export DBAOPS_CA=/path/to/internal-ca.crt
     export DBAOPS_TOKEN='read from a secret manager'
-    python3 agent_client.py --user jsmith dba_checkout
+    python3 agent_client.py dbprod01.example.internal dba_checkout
 """
 import argparse
-import getpass
 import json
 import os
 import ssl
@@ -47,29 +46,29 @@ class DbaOpsClient:
     def scripts(self):
         return self._call("GET", "/scripts")["scripts"]
 
-    def run(self, username, password, script, confirm=False):
+    def run(self, target_host, target_port, script, confirm=False):
         return self._call("POST", "/run", {
-            "username": username, "password": password, "script": script,
-            "confirm": confirm,
+            "target_host": target_host, "target_port": target_port,
+            "script": script, "confirm": confirm,
         })
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--user", default=os.environ.get("DBAOPS_USER", getpass.getuser()))
+    parser.add_argument("--port", type=int, default=22)
     parser.add_argument("--confirm", action="store_true")
+    parser.add_argument("target_host")
     parser.add_argument("script")
     a = parser.parse_args()
-    password = os.environ.get("DBAOPS_PASSWORD") or getpass.getpass(f"jump server password for {a.user}: ")
     token = os.environ.get("DBAOPS_TOKEN")
     if not token:
         parser.error("DBAOPS_TOKEN is required")
-    c = DbaOpsClient(os.environ.get("DBAOPS_URL", "https://127.0.0.1:8443"), token,
+    c = DbaOpsClient(os.environ.get("DBAOPS_URL", "http://10.17.34.78"), token,
                      cafile=os.environ.get("DBAOPS_CA"))
     try:
-        out = c.run(a.user, password, a.script, confirm=a.confirm)
+        out = c.run(a.target_host, a.port, a.script, confirm=a.confirm)
     except DbaOpsError as e:
         print(json.dumps(e.body, indent=2), file=sys.stderr)
         sys.exit(1)
-    print(f"user={out.get('user')} exit_code={out['exit_code']} status={out['status']}\n")
+    print(f"target={out['target_host']} exit_code={out['exit_code']} status={out['status']}\n")
     print(out["output"])

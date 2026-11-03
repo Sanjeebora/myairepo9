@@ -1,34 +1,64 @@
-# RHEL 7 deployment
+# RHEL 7 / BIG-IP deployment
 
-1. Give the gateway host a routed corporate network path, VPN, or approved
-   host-level tunnel to private address `10.17.34.78`; verify TCP/22 is
-   reachable.
-2. Install the organization's approved CPython 3.6.4 under
-   `/opt/python-3.6.4`. Create `/opt/dbaops-api/venv`, pin pip to 21.3.1, and
-   install `requirements.txt`.
-3. Create the `dbaops` system account. Install the application in
-   `/opt/dbaops-api`, `/etc/dbaops-api` as `root:dbaops` mode 0750, and
-   `/var/log/dbaops-api` as `dbaops:dbaops` mode 0750.
-4. Verify the SSH fingerprint for `10.17.34.78` out of band, then save its
-   public key in `/opt/dbaops-api/known_hosts`, owned by `dbaops`, mode 0600.
-5. Copy `config.example.json` to `/etc/dbaops-api/config.json` as
-   `root:dbaops`, mode 0640.
-6. Copy `dbaops.env.example` to `/etc/dbaops-api/dbaops.env` as root, mode 0600.
-   Set random `DBAOPS_API_TOKEN` (at least 32 characters) and `CCPS_SECRET`
-   values. Never commit this file.
-7. Copy `dbaops-api.service` to `/etc/systemd/system`, run
-   `systemctl daemon-reload`, then `systemctl enable --now dbaops-api`.
-8. Obtain an internal-CA TLS certificate. Copy `nginx-dbaops.conf` into
-   `/etc/nginx/conf.d`, adjust its DNS and certificate paths, run `nginx -t`,
-   and enable nginx. Gunicorn remains loopback-only on port 8080; clients use
-   HTTPS port 8443.
-9. Restrict TCP/8443 ingress to harness addresses and TCP/22 egress to
-   `10.17.34.78`. On enforcing SELinux hosts, enable nginx loopback proxying
-   with `setsebool -P httpd_can_network_connect 1`.
-10. Test `/health`, then perform a controlled `dba_checkout`. Verify plain HTTP
-    is rejected, arbitrary scripts return 400, and state-changing operations
-    return 409 without `confirm: true`.
+The Flask service is installed on actual jump server `10.17.66.19` and binds
+`0.0.0.0:8080`. BIG-IP maps `10.17.34.78:80` to that pool member. BIG-IP's
+separate `10.17.34.78:22 -> 10.17.66.19:22` mapping is for human SSH access;
+the Flask process does not use it.
 
-The gateway logs metadata only. Forward `/var/log/dbaops-api/audit.log` to the
-approved SIEM and monitor TLS expiry, 401/429/502 rates, route availability, and
-SSH host-key changes.
+1. Install the approved CPython 3.6.4 under `/opt/python-3.6.4`, create
+   `/opt/dbaops-api/venv`, pin pip to 21.3.1, and install `requirements.txt`.
+2. Create the unprivileged `dbaops` service account. Install application files
+   root-owned under `/opt/dbaops-api`; only `/var/log/dbaops-api` should be
+   writable by `dbaops`.
+3. Grant `dbaops` the narrowly administered, passwordless ability needed to
+   run `sudo -n su - oracle -c ...`. Disable `requiretty` only for this account.
+   Review this privilege with the host security owner.
+4. As oracle, verify `ccps` accepts its secret on standard input, then verify
+   passwordless SSH and each remote `/dba/bin` operation manually.
+5. Build `/etc/dbaops-api/target_known_hosts` from target keys obtained through
+   a trusted source. Verify fingerprints out of band. Make it `root:oracle`
+   mode 0640.
+6. Copy `config.example.json` to `/etc/dbaops-api/config.json`, replace the
+   example target hosts/CIDRs with the narrowest approved policy, and keep
+   target ports restricted to 22 unless a specific exception is approved.
+7. Copy `dbaops.env.example` to `/etc/dbaops-api/dbaops.env` as root mode 0600.
+   Set a random `DBAOPS_API_TOKEN` of at least 32 characters and `CCPS_SECRET`.
+8. Copy `dbaops-api.service` to `/etc/systemd/system`, then run:
+
+   ```bash
+   systemctl daemon-reload
+   systemctl enable --now dbaops-api
+   curl --fail http://127.0.0.1:8080/health
+   ```
+
+9. Configure the BIG-IP HTTP virtual server:
+
+   ```text
+   virtual address: 10.17.34.78
+   service port:    80
+   pool member:     10.17.66.19:8080
+   health monitor:  GET /health
+   ```
+
+10. Restrict host TCP/8080 ingress to BIG-IP self/SNAT addresses and approved
+    administration sources. Restrict outbound TCP to policy-approved target
+    CIDRs and ports.
+
+## TLS warning
+
+VIP port 80 is plaintext. `X-Token` is exposed to any party able to observe or
+modify that network path. The sample's `allow_insecure_http: true` is an
+explicit compatibility switch for the clarified mapping, not equivalent to
+transport security.
+
+Preferred production state:
+
+1. add BIG-IP VIP port 443 with an approved client-side TLS certificate/profile;
+2. keep the server-side pool mapping to `10.17.66.19:8080`;
+3. redirect or remove VIP port 80; and
+4. set `allow_insecure_http` to `false`.
+
+Test an allowlisted target, a denied hostname, a denied port, a hostname that
+resolves outside allowed CIDRs, an unknown host key, a state-changing request
+without confirmation, and timeout cleanup. Forward the metadata-only audit log
+to the approved SIEM.

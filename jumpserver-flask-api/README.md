@@ -1,76 +1,89 @@
 # DBA Jump-Server Gateway
 
 Production-oriented Flask gateway for RHEL 7.9, CPython 3.6.4, and pip 21.3.1.
-An agent harness authenticates with `X-Token`, supplies a person's SSH username
-and password for `10.17.34.78`, and requests one fixed operation. The gateway
-uses that login, runs `sudo su - oracle`, authenticates interactive `ccps` with
-`CCPS_SECRET`, and executes exactly one allowlisted file under `/dba/bin`.
+It runs on the actual jump server `10.17.66.19:8080`. BIG-IP publishes
+`10.17.34.78:80` to that HTTP service and independently maps VIP port 22 to the
+actual jump server's port 22.
 
-Allowed operations:
+The Flask service never SSHes to either jump-server address. For each authorized
+request it:
 
-* `dba_checkout`
-* `start_oracle` (requires `confirm: true`)
-* `stop_oracle` (requires `confirm: true`)
-* `maint_mode.sh` (requires `confirm: true`)
+1. validates `X-Token`;
+2. validates the requested target host and port against exact-host, CIDR, and
+   port policy;
+3. locally runs `sudo -n su - oracle`;
+4. feeds the server-side `CCPS_SECRET` to local interactive `ccps`; and
+5. uses the resulting passwordless credentials to SSH from the jump server to
+   the validated target and execute one fixed `/dba/bin` script.
 
-There is no command, argument, host, or path field. The jump host, script
-directory, `ccps` command, and allowlist are enforced in code and validated at
-startup.
+Allowed scripts are `dba_checkout`, `start_oracle`, `stop_oracle`, and
+`maint_mode.sh`. State-changing operations require `confirm: true`. There is no
+free-form command, argument, path, SSH user, or target password field.
 
-## Request
+## API
 
 ```http
 POST /run HTTP/1.1
+Host: 10.17.34.78
 X-Token: <gateway token>
 Content-Type: application/json
 
-{"username":"jsmith","password":"...","script":"dba_checkout","confirm":false}
+{"target_host":"dbprod01.example.internal","target_port":22,
+ "script":"dba_checkout","confirm":false}
 ```
 
-Successful and script-failure responses are structured JSON:
+Example response:
 
 ```json
 {
-  "jump_host": "10.17.34.78",
+  "jump_host": "10.17.66.19",
+  "target_host": "dbprod01.example.internal",
+  "target_port": 22,
   "script": "dba_checkout",
-  "command": "/dba/bin/dba_checkout",
+  "command": "ssh ... dbprod01.example.internal /dba/bin/dba_checkout",
   "exit_code": 0,
   "output": "...",
   "stderr": "",
   "status": "ok",
-  "user": "jsmith",
   "duration_s": 4.2
 }
 ```
 
-Infrastructure failures return JSON and HTTP 502. Invalid credentials return
-401, invalid input returns 400, missing confirmation returns 409, and saturation
-returns 429. Output is UTF-8 decoded with replacement, capped by
-`max_output_bytes`, and redacted for the supplied SSH password and configured
-ccps secret.
+Script nonzero exits return HTTP 200 with `status=script_failed`.
+Infrastructure failures return HTTP 502. Invalid policy/input returns 400,
+missing confirmation returns 409, and saturation returns 429.
 
-## Security properties
+## Target policy
 
-* `X-Token` uses constant-time comparison. The token and ccps secret are
-  environment-only values and never accepted in request JSON.
-* Paramiko rejects unknown SSH host keys. Password authentication cannot be
-  redirected to another server.
-* User input cannot become a command. Usernames are validated; script names map
-  to four literal paths.
-* Passwords are accepted only over TLS. A loopback reverse proxy is recognized
-  only when the connection source is loopback and it sets
-  `X-Forwarded-Proto: https`.
-* The application logs only event metadata. It does not log headers, request
-  bodies, command input, or raw script output.
-* SSH and command operations have deadlines, concurrency is bounded, and the
-  request body is limited to 16 KiB.
+`config.json` must define at least one `target_allowed_hosts` or
+`target_allowed_cidrs` entry and a non-empty `target_allowed_ports` list.
+Every hostname is resolved during validation and SSH receives the validated
+numeric address to prevent DNS rebinding between policy evaluation and
+connection. Exact hostname entries use OpenSSH `HostKeyAlias` so keys remain
+pinned to the configured name. Both jump-server addresses are rejected as
+targets regardless of allowlist or DNS.
 
-## Install and test
+OpenSSH uses `BatchMode=yes`, strict host-key checking, a dedicated
+`target_known_hosts` file, and bounded connection/operation deadlines. Output
+is continuously drained, retained to a configured cap, UTF-8 decoded safely,
+and redacted for the ccps secret.
 
-See [`deploy/README.md`](deploy/README.md) for deployment instructions. The
-project delivery also includes a more detailed step-by-step operator guide.
+## BIG-IP and TLS
 
-For development on a supported modern host:
+The clarified VIP mapping `10.17.34.78:80 -> 10.17.66.19:8080` is plaintext.
+It does not protect `X-Token` from observation or modification. The sample
+configuration enables `allow_insecure_http` only so this exact mapping can
+operate on a trusted, source-restricted network.
+
+The production recommendation is to add a BIG-IP HTTPS virtual server (normally
+VIP port 443) with an approved client-side TLS profile, forward to pool member
+`10.17.66.19:8080`, and then set `allow_insecure_http` to `false`. In either
+case, restrict the pool member's port 8080 so only BIG-IP health checks/data
+plane addresses and approved local administrators can reach it.
+
+## Deployment and testing
+
+See [`deploy/README.md`](deploy/README.md).
 
 ```bash
 python3 -m venv venv
@@ -79,14 +92,9 @@ DBAOPS_API_TOKEN=test-token-with-at-least-32-characters CCPS_SECRET=test-secret 
   venv/bin/python -m pytest -q
 ```
 
-Validate production configuration:
+Validate configuration without displaying secret values:
 
 ```bash
 DBAOPS_API_TOKEN='from-secret-store' CCPS_SECRET='from-secret-store' \
   venv/bin/python -m dbaops_api -c /etc/dbaops-api/config.json check
 ```
-
-Production uses gunicorn bound to `127.0.0.1:8080` behind the supplied nginx TLS
-configuration. Never expose Flask/gunicorn plaintext on the network. A private
-`10.x` address is not Internet-routable: the service host must have a corporate
-route, VPN, or approved tunnel to `10.17.34.78`.
