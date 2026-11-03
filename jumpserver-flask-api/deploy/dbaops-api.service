@@ -9,18 +9,16 @@ User=dbaops
 Group=dbaops
 WorkingDirectory=/opt/dbaops-api
 EnvironmentFile=/etc/dbaops-api/dbaops.env
-# Exactly one worker: logins are held in memory, so every request must reach the same process.
-# --timeout must be longer than the longest script timeout in config.json (+30s).
 ExecStart=/opt/dbaops-api/venv/bin/gunicorn \
-    --workers 1 --worker-class gthread --threads 16 \
-    --bind 0.0.0.0:8443 --timeout 960 --graceful-timeout 30 \
-    --certfile /etc/dbaops-api/tls.crt --keyfile /etc/dbaops-api/tls.key \
+    --workers 1 --worker-class gthread --threads 4 \
+    --bind 0.0.0.0:8080 --timeout 660 --graceful-timeout 30 \
     --access-logfile - --error-logfile - \
     wsgi:app
 Restart=on-failure
 RestartSec=5
-NoNewPrivileges=yes
 PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/var/log/dbaops-api
 
 [Install]
 WantedBy=multi-user.target
