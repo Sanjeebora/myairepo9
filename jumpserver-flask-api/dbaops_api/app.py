@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import hmac
 import json
 import logging
 import os
@@ -19,7 +20,7 @@ from .sessions import AuthError, JumpUnavailable, LoginFailed, SessionStore, Too
 log = logging.getLogger(__name__)
 audit = logging.getLogger("dbaops.audit")
 
-PUBLIC_ENDPOINTS = {"health", "login"}
+PUBLIC_ENDPOINTS = {"health"}
 LOOPBACK = {"127.0.0.1", "::1"}
 
 
@@ -53,6 +54,10 @@ def create_app(config_path: Optional[str] = None,
                connector: Optional[Callable[..., Any]] = None,
                analyzer: Optional[Callable[..., str]] = None) -> Flask:
     cfg: AppConfig = load_config(config_path or default_config_path())
+    gateway_token = cfg.xtoken
+    if not gateway_token:
+        raise ConfigError(
+            f"Gateway token is not set. Inject it through the {cfg.xtoken_env} environment variable.")
     store = SessionStore(cfg.jumpserver, cfg.session_ttl_seconds, connector or _default_connector)
     atexit.register(store.close_all)
     runner = Runner(cfg)
@@ -75,7 +80,12 @@ def create_app(config_path: Optional[str] = None,
 
     @app.before_request
     def require_session():
-        if request.endpoint in PUBLIC_ENDPOINTS or request.endpoint is None:
+        if request.endpoint in PUBLIC_ENDPOINTS:
+            return None
+        supplied_token = request.headers.get("X-Token", "")
+        if not supplied_token or not hmac.compare_digest(supplied_token, gateway_token):
+            return error(401, "Missing or invalid X-Token")
+        if request.endpoint in {"login", None}:
             return None
         try:
             g.session = store.get(session_token())

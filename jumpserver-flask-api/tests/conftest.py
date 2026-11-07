@@ -12,6 +12,12 @@ from dbaops_api.runner import MARKER, Completed  # noqa: E402
 from dbaops_api.sessions import LoginFailed  # noqa: E402
 
 PASSWORDS = {"jsmith": "Secret#123", "akumar": "Other#456"}
+XTOKEN = "unit-test-gateway-token"
+
+
+@pytest.fixture(autouse=True)
+def gateway_token(monkeypatch):
+    monkeypatch.setenv("DBAOPS_XTOKEN", XTOKEN)
 
 
 @pytest.fixture
@@ -88,11 +94,12 @@ def client(app):
 
 def login(client, username="jsmith", password=None):
     return client.post("/session", json={"username": username,
-                                         "password": password or PASSWORDS[username]})
+                                         "password": password or PASSWORDS[username]},
+                       headers={"X-Token": XTOKEN})
 
 
 @pytest.fixture
 def headers(client):
     resp = login(client)
     assert resp.status_code == 200, resp.get_json()
-    return {"X-Session-Token": resp.get_json()["token"]}
+    return {"X-Token": XTOKEN, "X-Session-Token": resp.get_json()["token"]}

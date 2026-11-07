@@ -69,6 +69,9 @@ class JumpConfig:
 class AppConfig:
     scripts: Dict[str, ScriptConfig]
     jumpserver: JumpConfig = field(default_factory=JumpConfig)
+    # Shared gateway credential presented by the remote harness in X-Token.
+    # The value itself is always read from the process environment, never JSON.
+    xtoken_env: str = "DBAOPS_XTOKEN"
     script_dir: str = "/dba/bin"
     # Runs as the logged-in person. "sudo" gets "-S -p <prompt>" added so their
     # password can be supplied if their sudo rule asks for it.
@@ -107,6 +110,10 @@ class AppConfig:
     @property
     def ccps_passphrase(self) -> Optional[str]:
         return os.environ.get(self.ccps_passphrase_env) if self.ccps_passphrase_env else None
+
+    @property
+    def xtoken(self) -> Optional[str]:
+        return os.environ.get(self.xtoken_env) if self.xtoken_env else None
 
     def script_path(self, script: ScriptConfig) -> str:
         return self.script_dir.rstrip("/") + "/" + script.file
@@ -186,4 +193,6 @@ def load_config(path: str) -> AppConfig:
         raise ConfigError("max_concurrent must be at least 1")
     if not isinstance(cfg.become, list) or not all(isinstance(a, str) for a in cfg.become):
         raise ConfigError('become must be a list, for example ["sudo", "su", "-", "oracle", "-c"]')
+    if not isinstance(cfg.xtoken_env, str) or not cfg.xtoken_env:
+        raise ConfigError("xtoken_env must name a non-empty environment variable")
     return cfg
