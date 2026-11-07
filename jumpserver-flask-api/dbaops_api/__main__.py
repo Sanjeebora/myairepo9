@@ -69,6 +69,7 @@ def main(argv=None) -> int:
         print(f"Config OK: {args.config}")
         print(f"Scripts: {', '.join(cfg.scripts)}")
         print(f"People log in to {j.host}:{j.port}; host keys from {j.known_hosts}")
+        print(f"Gateway xToken ({cfg.xtoken_env}): {'set' if cfg.xtoken else 'NOT SET'}")
         print(f"ccps passphrase ({cfg.ccps_passphrase_env}): "
               f"{'set' if cfg.ccps_passphrase else 'NOT SET (only fine if cp993 has no passphrase)'}")
         if cfg.llm.enabled:

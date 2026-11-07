@@ -1,5 +1,7 @@
 {
   "_comment": "Copy to /opt/dbaops-api/config.json. Keys starting with _ are ignored.",
+  "_xtoken_env": "The gateway xToken value is read only from this environment variable.",
+  "xtoken_env": "DBAOPS_XTOKEN",
 
   "jumpserver": {
     "_comment": "People log in here over SSH with their own username and password.",
@@ -56,6 +58,12 @@
     "start_oracle": {
       "file": "start_oracle",
       "description": "Start Oracle instances and listeners",
+      "state_changing": true,
+      "timeout": 900
+    },
+    "stop_oracle": {
+      "file": "stop_oracle",
+      "description": "Stop Oracle instances and listeners",
       "state_changing": true,
       "timeout": 900
     },

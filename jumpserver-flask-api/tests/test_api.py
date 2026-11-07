@@ -1,7 +1,11 @@
 import json
 import time
 
-from conftest import PASSWORDS, login
+import pytest
+
+from conftest import PASSWORDS, XTOKEN, login
+
+GATEWAY_HEADERS = {"X-Token": XTOKEN}
 
 
 def test_health_needs_no_token(client):
@@ -15,7 +19,8 @@ def test_login_with_own_username_and_password(client, fake):
     assert body["user"] == "jsmith"
     assert len(body["token"]) == 43  # secrets.token_urlsafe(32)
     assert fake.sessions[0].username == "jsmith"
-    who = client.get("/session", headers={"X-Session-Token": body["token"]}).get_json()
+    who = client.get("/session", headers={
+        "X-Token": XTOKEN, "X-Session-Token": body["token"]}).get_json()
     assert who["user"] == "jsmith"
 
 
@@ -26,10 +31,29 @@ def test_wrong_password(client):
 
 
 def test_bad_login_bodies(client):
-    assert client.post("/session", data="x").status_code == 400
-    assert client.post("/session", json={"username": "jsmith"}).status_code == 400
-    assert client.post("/session", json={"username": "root;id", "password": "x"}).status_code == 400
-    assert client.post("/session", json={"username": "-oProxy", "password": "x"}).status_code == 400
+    assert client.post("/session", data="x", headers=GATEWAY_HEADERS).status_code == 400
+    assert client.post("/session", json={"username": "jsmith"},
+                       headers=GATEWAY_HEADERS).status_code == 400
+    assert client.post("/session", json={"username": "root;id", "password": "x"},
+                       headers=GATEWAY_HEADERS).status_code == 400
+    assert client.post("/session", json={"username": "-oProxy", "password": "x"},
+                       headers=GATEWAY_HEADERS).status_code == 400
+
+
+def test_gateway_xtoken_required_before_jump_auth(client, fake):
+    body = {"username": "jsmith", "password": PASSWORDS["jsmith"]}
+    assert client.post("/session", json=body).status_code == 401
+    assert client.post("/session", json=body, headers={"X-Token": "wrong"}).status_code == 401
+    assert fake.sessions == []
+
+
+def test_service_fails_closed_without_configured_gateway_token(config_path, fake, monkeypatch):
+    from dbaops_api.app import create_app
+    from dbaops_api.config import ConfigError
+
+    monkeypatch.delenv("DBAOPS_XTOKEN")
+    with pytest.raises(ConfigError, match="Gateway token is not set"):
+        create_app(config_path, connector=fake.connect)
 
 
 def test_failed_logins_are_rate_limited(client):
@@ -42,10 +66,12 @@ def test_failed_logins_are_rate_limited(client):
 
 def test_plain_http_login_refused_from_remote_host(client):
     resp = client.post("/session", json={"username": "jsmith", "password": PASSWORDS["jsmith"]},
+                       headers=GATEWAY_HEADERS,
                        environ_base={"REMOTE_ADDR": "10.1.2.3"})
     assert resp.status_code == 403
     assert "HTTPS" in resp.get_json()["error"]
     resp = client.post("/session", json={"username": "jsmith", "password": PASSWORDS["jsmith"]},
+                       headers=GATEWAY_HEADERS,
                        base_url="https://localhost", environ_base={"REMOTE_ADDR": "10.1.2.3"})
     assert resp.status_code == 200
 
@@ -83,8 +109,10 @@ def test_run_uses_the_logged_in_persons_session(client, headers, fake):
 def test_two_people_get_separate_sessions(client, fake):
     t1 = login(client, "jsmith").get_json()["token"]
     t2 = login(client, "akumar").get_json()["token"]
-    client.post("/run", headers={"X-Session-Token": t2}, json={"host": "db1", "script": "showsid"})
-    client.post("/run", headers={"X-Session-Token": t1}, json={"host": "db1", "script": "showsid"})
+    client.post("/run", headers={"X-Token": XTOKEN, "X-Session-Token": t2},
+                json={"host": "db1", "script": "showsid"})
+    client.post("/run", headers={"X-Token": XTOKEN, "X-Session-Token": t1},
+                json={"host": "db1", "script": "showsid"})
     assert [c[0] for c in fake.calls] == ["akumar", "jsmith"]
 
 
@@ -135,15 +163,18 @@ def test_script_args_are_quoted_as_one_remote_command(client, headers):
 
 
 def test_missing_and_bad_token(client):
-    resp = client.post("/run", json={"host": "dbprod01", "script": "dba_checkout"})
+    resp = client.post("/run", headers=GATEWAY_HEADERS,
+                       json={"host": "dbprod01", "script": "dba_checkout"})
     assert resp.status_code == 401
     assert "Missing session token" in resp.get_json()["error"]
-    assert client.get("/scripts", headers={"X-Session-Token": "nope"}).status_code == 401
+    assert client.get("/scripts", headers={
+        "X-Token": XTOKEN, "X-Session-Token": "nope"}).status_code == 401
 
 
 def test_bearer_header_also_accepted(client, headers):
     token = headers["X-Session-Token"]
-    assert client.get("/scripts", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+    assert client.get("/scripts", headers={
+        "X-Token": XTOKEN, "Authorization": f"Bearer {token}"}).status_code == 200
 
 
 def test_bad_hosts_rejected(client, headers, fake):

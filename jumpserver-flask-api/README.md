@@ -1,8 +1,9 @@
 # Jump Server DBA Ops API (Flask)
 
 A small Flask service that runs **on the jump server** (RHEL 7.9, Python 3.8, Flask 3.0.3).
-Each person logs in with **their own jump server username and password**. The agent harness
-then sends requests with that person's session token, and the service:
+An agent harness first authenticates every non-health API request with a shared `X-Token` injected
+from its secret store. Each person then logs in with **their own jump server username and password**.
+The service returns a short-lived per-user session token and:
 
 1. uses the person's own SSH login to the jump server,
 2. runs `sudo su - oracle` with **their** sudo rights (normally passwordless; if sudo does ask, it answers with their password),
@@ -11,9 +12,10 @@ then sends requests with that person's session token, and the service:
 5. returns the script's stdout and exit code as JSON so your agent can reason over it.
 
 ```
- agent harness host                       jump server (RHEL 7.9)                           DB server
+ internet-hosted harness                  jump server (RHEL 7.9)                           DB server
 +-------------------+  HTTPS             +------------------------------------------+  ssh  +-----------------+
-| person logs in    | -- POST /session ->| Flask (runs as dbaops, no sudo rights)   |       |                 |
+| X-Token header    |                    | Flask (runs as dbaops, no sudo rights)   |       |                 |
+| person logs in    | -- POST /session ->|   validates gateway token, then opens    |       |                 |
 | user + password   | <-- token -------- |   opens SSH to localhost AS THAT PERSON  |       |                 |
 |                   |                    |                                          |       |                 |
 | agent / LLM       | -- POST /run ----> |   jsmith$ sudo su - oracle -c '          | ----> | /dba/bin/script |
@@ -28,9 +30,41 @@ log records the same name. The service account itself has no sudo rights.
 The agent can only run scripts listed in `config.json`. There is no free-form command field, the
 host is checked against a hostname pattern, and scripts marked `state_changing` need `"confirm": true`.
 
+## Transport decision and assumptions
+
+`10.145.23.180` is an RFC 1918 private address. An internet-hosted harness cannot reach it through
+normal Internet routing. Before using this project, provide one of these paths:
+
+1. **Preferred:** a private connector/VPN (WireGuard, IPsec, cloud transit gateway, or equivalent)
+   from the harness network to the jump-server subnet, with an encrypted tunnel and a route for
+   `10.145.23.180/32`.
+2. HTTPS exposed through a tightly restricted reverse proxy or private load balancer with a trusted
+   certificate and source-IP allow-list.
+
+Do not expose Flask or `10.145.23.180` directly to the public Internet. Plain HTTP does not protect
+the xToken, jump password, session token, or output. The harness client therefore rejects HTTP by
+default. For the specifically requested `http://10.145.23.180:<port>` form, enable HTTP only after
+the route is inside an authenticated encrypted tunnel; `DBAOPS_ALLOW_HTTP=1` is an explicit
+acknowledgement of that prerequisite. HTTPS remains preferred even inside the tunnel.
+
+Other assumptions:
+
+- The service is installed on the host represented by VIP `10.145.23.180`, or the VIP forwards to
+  exactly one active service instance. In-memory sessions require sticky/single-instance routing.
+- The harness has stable private egress that the jump firewall can allow-list.
+- A human user has an SSH/PAM account on the jump host and is authorized for `sudo su - oracle`.
+- `~oracle/.ssh/cp993`, target host keys, and target authorization are already provisioned.
+- Existing scripts under `$DBA/bin` are actually `/dba/bin` on targets. Change `script_dir` if the
+  environment differs; this service does not upload or generate target scripts.
+- State-changing operations (`start_oracle`, `stop_oracle`, `maint_mode`) remain human-approved.
+
+The xToken authenticates the harness to the HTTP gateway; it does **not** replace the named user's
+jump-host authentication. This separation preserves the SSH/PAM and sudo audit trail.
+
 ## How a login works
 
-1. `POST /session` with `{"username": "jsmith", "password": "..."}`.
+1. `POST /session` with the runtime-injected `X-Token` header and
+   `{"username": "jsmith", "password": "..."}`.
 2. The service opens an SSH connection to the jump server (`127.0.0.1:22` by default) as `jsmith`
    with that password. sshd and PAM check it exactly as if jsmith had typed `ssh jsmith@jumpserver`,
    so the normal password policy applies, including expiry, account lockout, and LDAP/AD through sssd.
@@ -250,6 +284,7 @@ The rest:
 
 | key | meaning |
 | --- | --- |
+| `xtoken_env` | Environment variable containing the harness gateway credential. Keep the default `DBAOPS_XTOKEN`; never put the value in JSON. |
 | `script_dir` | `/dba/bin`. Every script runs as `<script_dir>/<file>` on the target. |
 | `become` | How to become oracle. Default `["sudo","su","-","oracle","-c"]`. The service adds `-S -p <prompt>` after `sudo`. |
 | `ccps` | The real ccps command, run in the oracle shell before ssh. |
@@ -281,21 +316,25 @@ Each script entry (the `//` notes are explanations only; JSON does not allow com
 `/scripts` and `/tools` are generated from this list, so your agent always sees the current allow-list.
 Keys that start with `_` are ignored, so you can use `"_comment"`.
 
-### Step 8. Store the ccps passphrase, then test as yourself (root)
+### Step 8. Inject the gateway xToken and ccps passphrase, then test as yourself (root)
 
-Create the env file and put the cp993 passphrase in it:
+Create the env file. Generate a separate high-entropy gateway token on the jump host and put it,
+along with the cp993 passphrase, only in that protected file:
 
 ```bash
 cp /opt/dbaops-api/deploy/dbaops.env.example /etc/dbaops-api/dbaops.env
 chown root:dbaops /etc/dbaops-api/dbaops.env && chmod 640 /etc/dbaops-api/dbaops.env
-vi /etc/dbaops-api/dbaops.env          # set:  CCPS_PASSPHRASE=<the cp993 passphrase>
+openssl rand -hex 32                    # copy output directly into your secret manager
+vi /etc/dbaops-api/dbaops.env          # set DBAOPS_XTOKEN and CCPS_PASSPHRASE
 ```
 
-The CLI and the service both read this file. Then:
+Inject the same `DBAOPS_XTOKEN` value into the harness secret store. Do not pass either secret as a
+command-line argument: process listings and shell history may expose it. The CLI and service read
+the protected env file. Then:
 
 ```bash
 cd /opt/dbaops-api
-sudo -u dbaops venv/bin/python -m dbaops_api check      # should say "ccps passphrase (CCPS_PASSPHRASE): set"
+sudo -u dbaops venv/bin/python -m dbaops_api check      # both secret checks should say "set"
 sudo -u dbaops venv/bin/python -m dbaops_api dry-run --host dbprod01 --script dba_checkout
 sudo -u dbaops venv/bin/python -W ignore -m dbaops_api try --user jsmith --host dbprod01 --script dba_checkout
 ```
@@ -318,6 +357,12 @@ chmod 640 /etc/dbaops-api/tls.key
 RHEL 7's OpenSSL 1.0.2 does not support `-addext`. If the harness checks the hostname, add a
 `subjectAltName` through a small `-config` file. Copy `tls.crt` to the harness host so it can trust it.
 
+For the required private-tunnel HTTP deployment only, TLS may be terminated by the encrypted
+overlay instead: set `jumpserver.allow_http_login` to `true`, bind only to the tunnel/VIP address,
+and remove the two gunicorn `--certfile`/`--keyfile` options. Do this only after packet capture or
+network-owner confirmation verifies that traffic from the harness to `10.145.23.180` cannot leave
+the encrypted tunnel. Do not use `allow_http_login` on a public or unencrypted network.
+
 ### Step 10. Run it as a systemd service (root)
 
 The unit loads `/etc/dbaops-api/dbaops.env` from step 8, including `CCPS_PASSPHRASE`.
@@ -335,47 +380,69 @@ The unit runs gunicorn with **exactly one worker** (`--workers 1 --threads 16`).
 process's memory, so a second worker would not know about them. `--timeout 960` must be longer than
 your longest script timeout plus 30 seconds.
 
-### Step 11. Open the port only to the agent harness host (root)
+For the encrypted-private-tunnel HTTP variant, first set `allow_http_login` to `true` in
+`config.json`, then run `systemctl edit dbaops-api` and enter this complete override:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/opt/dbaops-api/venv/bin/gunicorn --workers 1 --worker-class gthread --threads 16 --bind 10.145.23.180:8080 --timeout 960 --graceful-timeout 30 --access-logfile - --error-logfile - wsgi:app
+```
+
+Apply and verify it with:
+
+```bash
+systemctl daemon-reload
+systemctl restart dbaops-api
+curl --fail http://10.145.23.180:8080/health
+```
+
+### Step 11. Route and firewall only the agent harness (network administrator/root)
 
 ```bash
 firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="10.20.30.40/32" port port="8443" protocol="tcp" accept'
 firewall-cmd --reload
 ```
 
-Replace `10.20.30.40` with the harness host's IP. SELinux needs no change for gunicorn started by
-systemd.
+Replace `10.20.30.40` with the harness's stable **private-tunnel egress** IP. For an HTTP deployment,
+use its configured HTTP port instead of `8443`. Confirm from the harness that:
+
+```bash
+ip route get 10.145.23.180
+nc -vz 10.145.23.180 8080
+```
+
+The route must name the VPN/private connector, not the public Internet default route. SELinux needs
+no change for gunicorn started by systemd.
 
 ### Step 12. Call it from the agent harness host
 
+Configure the harness secret store to inject `DBAOPS_XTOKEN`; do not print it, put it in a command
+flag, or persist it in a workspace file. For the requested private-tunnel HTTP endpoint:
+
 ```bash
-export JUMP=https://jumpserver.example.com:8443
-export CA=/path/to/tls.crt          # the certificate from step 9
-
-# 1. log in as yourself (read -s keeps the password off the screen and out of shell history)
-read -s -p "jump server password: " PW; echo
-TOKEN=$(curl -s --cacert $CA -X POST $JUMP/session -H 'Content-Type: application/json' \
-          -d "{\"username\":\"$USER\",\"password\":\"$PW\"}" \
-        | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
-unset PW
-
-# 2. run scripts with the token
-curl -s --cacert $CA -X POST $JUMP/run \
-  -H "X-Session-Token: $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"host":"dbprod01","script":"dba_checkout","confirm":false,"analyze":false}'
-
-# 3. log out when done
-curl -s --cacert $CA -X DELETE $JUMP/session -H "X-Session-Token: $TOKEN"
+export DBAOPS_URL=http://10.145.23.180:8080
+export DBAOPS_ALLOW_HTTP=1             # only because the route is an encrypted private tunnel
+export DBAOPS_USER=jsmith
+python3 examples/agent_client.py dbprod01 dba_checkout
 ```
 
-A password that contains `"` or `\` breaks the hand-written JSON above. The Python client below
-handles any password.
+The client prompts without echo for the jump password, sends the injected xToken in `X-Token`,
+authenticates the user over localhost SSH, runs the selected allow-listed script, prints structured
+JSON, and logs out. For HTTPS, use `https://10.145.23.180:8443`, unset `DBAOPS_ALLOW_HTTP`, and set
+`DBAOPS_CA` to the CA file.
+
+For harness integration, construct `DbaOpsClient` once per user turn, call `tools()` to discover
+the current allow-list, call `run(host, script, confirm=False)`, and call `logout()` in a `finally`
+block. Only set `confirm=True` after explicit human approval for a state-changing script.
 
 ---
 
 ## API reference
 
-All endpoints except `/health` and `POST /session` need `X-Session-Token: <token>` (or
-`Authorization: Bearer <token>`).
+Every endpoint except `/health` requires `X-Token: <runtime-injected-gateway-token>`.
+Authenticated endpoints other than `POST /session` also require
+`X-Session-Token: <session-token>` (or `Authorization: Bearer <session-token>`).
 
 | method | path | purpose |
 | --- | --- | --- |
@@ -389,7 +456,8 @@ All endpoints except `/health` and `POST /session` need `X-Session-Token: <token
 
 ### POST /run
 
-Headers: `X-Session-Token: b_bKfGkc9dZIMkQ6GArwara9c-w0QIueIhkrOrjRYlg`, `Content-Type: application/json`
+Headers: `X-Token: <gateway-token>`, `X-Session-Token: <session-token>`,
+`Content-Type: application/json`
 
 ```json
 { "host": "dbprod01", "script": "dba_checkout", "confirm": false, "analyze": false }
@@ -427,7 +495,7 @@ Errors (always JSON with an `error` field):
 | code | when |
 | --- | --- |
 | `400` | Bad host, unknown script, body is not JSON, `confirm`/`analyze` not a boolean, `analyze: true` with no LLM configured, or (on login) a missing or invalid username or password field. |
-| `401` | Missing, unknown, or expired session token, or (on login) a wrong username or password. |
+| `401` | Missing/invalid gateway xToken; missing, unknown, or expired session token; or (on login) a wrong username or password. |
 | `403` | Login attempted over plain HTTP from another host. |
 | `409` | State-changing script without `"confirm": true`. |
 | `429` | Too many failed logins, or `max_concurrent` scripts already running. |
@@ -441,10 +509,12 @@ timeout or a service restart):
 
 ```python
 import getpass
+import os
 from agent_client import DbaOpsClient, handle_tool_call
 
 client = DbaOpsClient("https://jumpserver:8443", username="jsmith",
                       password=getpass.getpass("jump server password: "),
+                      xtoken=os.environ["DBAOPS_XTOKEN"],
                       cafile="/path/to/tls.crt")
 tools = client.tools()                 # hand these to your LLM as its tool list
 result = client.run("dbprod01", "dba_checkout")
@@ -467,6 +537,9 @@ sends `"confirm": true`, rather than letting the LLM set it on its own.
 
 - Every command runs in the person's own SSH login, with their own sudo rights. The service account
   (`dbaops`) has no sudo rights and no keys.
+- Every non-health API call must pass the high-entropy gateway xToken. It is compared in constant
+  time and exists only in protected runtime environments; per-user session authentication is still
+  required.
 - Passwords are accepted only over HTTPS (or from the jump server itself). They are never logged or
   written to disk, they are masked in returned output, and they are sent only to an SSH server whose
   host key is in `known_hosts`.
