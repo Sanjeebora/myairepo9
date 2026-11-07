@@ -31,6 +31,8 @@
     "-o", "ServerAliveInterval=30",
     "-o", "StrictHostKeyChecking=yes"
   ],
+  "_target_host_fingerprints": "Exact host -> trusted SHA256 fingerprints obtained out of band. Required only by enroll-host.",
+  "target_host_fingerprints": {},
 
   "_host_pattern": "Tighten this to your naming standard, e.g. ^db[a-z0-9-]+(\\.corp\\.example\\.com)?$",
   "host_pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\\.[A-Za-z0-9-]{1,63})*$",
