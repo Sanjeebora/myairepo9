@@ -40,7 +40,7 @@ def connect(cfg: JumpConfig, username: str, password: str) -> paramiko.SSHClient
         if "not found in known_hosts" in str(exc):
             raise JumpUnavailable(
                 f"The jump server host key for {cfg.host} is not in {cfg.known_hosts}. "
-                f"Add it with: ssh-keyscan -p {cfg.port} {cfg.host} >> {cfg.known_hosts}")
+                "Install the verified local sshd public host key as documented in README step 5.")
         raise JumpUnavailable(f"SSH to {cfg.host}:{cfg.port} failed: {exc}")
     except (socket.error, OSError) as exc:
         client.close()

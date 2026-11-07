@@ -87,6 +87,9 @@ class AppConfig:
         "-o", "ServerAliveInterval=30",
         "-o", "StrictHostKeyChecking=yes",
     ])
+    # Out-of-band SHA-256 fingerprints used only by the operator-run enroll-host command.
+    # Runtime SSH remains StrictHostKeyChecking=yes.
+    target_host_fingerprints: Dict[str, List[str]] = field(default_factory=dict)
     host_pattern: str = DEFAULT_HOST_PATTERN
     allowed_hosts: List[str] = field(default_factory=list)
     default_timeout: int = 600
@@ -193,6 +196,45 @@ def load_config(path: str) -> AppConfig:
         raise ConfigError("max_concurrent must be at least 1")
     if not isinstance(cfg.become, list) or not all(isinstance(a, str) for a in cfg.become):
         raise ConfigError('become must be a list, for example ["sudo", "su", "-", "oracle", "-c"]')
+    if not isinstance(cfg.ssh_options, list) or not all(isinstance(a, str) for a in cfg.ssh_options):
+        raise ConfigError("ssh_options must be a list of strings")
+    options = _parsed_ssh_options(cfg.ssh_options)
+    for required in ("batchmode", "stricthostkeychecking"):
+        if options.get(required) != ["yes"]:
+            raise ConfigError(
+                f"ssh_options must set exactly one {required}=yes and must not override it")
     if not isinstance(cfg.xtoken_env, str) or not cfg.xtoken_env:
         raise ConfigError("xtoken_env must name a non-empty environment variable")
+    if not isinstance(cfg.target_host_fingerprints, dict):
+        raise ConfigError("target_host_fingerprints must be an object")
+    fingerprint_re = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
+    for host, fingerprints in cfg.target_host_fingerprints.items():
+        cfg.validate_host(host)
+        if (not isinstance(fingerprints, list) or not fingerprints
+                or not all(isinstance(fp, str) and fingerprint_re.match(fp)
+                           for fp in fingerprints)):
+            raise ConfigError(
+                f"target_host_fingerprints.{host} must be a non-empty list of SHA256 fingerprints")
     return cfg
+
+
+def _parsed_ssh_options(argv: List[str]) -> Dict[str, List[str]]:
+    parsed: Dict[str, List[str]] = {}
+    index = 0
+    while index < len(argv):
+        item = argv[index]
+        if item == "-o":
+            index += 1
+            if index >= len(argv):
+                raise ConfigError("ssh_options has '-o' without a value")
+            option = argv[index]
+        elif item.startswith("-o") and len(item) > 2:
+            option = item[2:]
+        else:
+            index += 1
+            continue
+        if "=" in option:
+            key, value = option.split("=", 1)
+            parsed.setdefault(key.lower(), []).append(value.lower())
+        index += 1
+    return parsed

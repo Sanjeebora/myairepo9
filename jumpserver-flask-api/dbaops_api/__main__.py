@@ -48,6 +48,12 @@ def main(argv=None) -> int:
     dry.add_argument("--host", required=True)
     dry.add_argument("--script", required=True)
 
+    enroll = sub.add_parser(
+        "enroll-host", help="verify a target SSH key fingerprint and add it to known_hosts")
+    enroll.add_argument("--host", required=True)
+    enroll.add_argument("--known-hosts", default=None,
+                        help="override the effective user's ~/.ssh/known_hosts")
+
     try_ = sub.add_parser("try", help="log in as yourself and run one script, without HTTP")
     try_.add_argument("--user", default=getpass.getuser())
     try_.add_argument("--host", required=True)
@@ -86,9 +92,32 @@ def main(argv=None) -> int:
         app.run(host=args.host, port=args.port, threaded=True, use_reloader=False)
         return 0
 
-    runner = Runner(cfg)
     try:
         host = cfg.validate_host(args.host)
+    except ConfigError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+
+    if args.cmd == "enroll-host":
+        from pathlib import Path
+        from .hostkeys import HostKeyError, enroll_host
+        try:
+            result = enroll_host(
+                host, cfg.target_host_fingerprints.get(host, []),
+                Path(args.known_hosts) if args.known_hosts else None)
+        except HostKeyError as exc:
+            print(f"Host key enrollment failed: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps({
+            "status": result.status,
+            "host": result.host,
+            "known_hosts": result.known_hosts,
+            "fingerprints": result.fingerprints,
+        }, indent=2))
+        return 0
+
+    runner = Runner(cfg)
+    try:
         script = cfg.get_script(args.script)
     except ConfigError as exc:
         print(exc, file=sys.stderr)

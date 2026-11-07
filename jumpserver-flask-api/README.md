@@ -170,20 +170,14 @@ Log in to the jump server as yourself (not root), then:
 ```bash
 sudo su - oracle
 eval `ssh-agent`; ssh-add ~/.ssh/cp993          # ccps
-ssh -o BatchMode=yes dbprod01 /dba/bin/dba_checkout
-echo "exit code: $?"
 ssh-agent -k
 exit
 ```
 
 `sudo su - oracle` should not ask for a password, and `ssh-add` asks only for the cp993 passphrase
-(the service supplies it from `CCPS_PASSPHRASE`). Nothing else may prompt, in particular not
-"Are you sure you want to continue connecting":
-
-- **Host key prompt**: `BatchMode=yes` and `StrictHostKeyChecking=yes` refuse unknown hosts. RHEL 7's
-  OpenSSH 7.4 does not support `accept-new`, so add the keys once as oracle
-  (`ssh-keyscan dbprod01 >> ~/.ssh/known_hosts`, and check the fingerprints), or ssh to each host by
-  hand one time.
+(the service supplies it from `CCPS_PASSPHRASE`). Do not answer an SSH authenticity prompt or append
+raw `ssh-keyscan` output. Target keys are enrolled against an independently obtained fingerprint in
+step 7.
 
 ### Step 2. Make sure each person may `sudo su - oracle` (root)
 
@@ -231,11 +225,18 @@ chown dbaops:dbaops /var/log/dbaops-api
 
 ```bash
 cp -r jumpserver-flask-api/. /opt/dbaops-api/
-ssh-keyscan -t rsa,ecdsa,ed25519 127.0.0.1 > /opt/dbaops-api/known_hosts
+for key in /etc/ssh/ssh_host_{rsa,ecdsa,ed25519}_key.pub; do
+  [ ! -r "$key" ] || awk '{print "127.0.0.1 " $1 " " $2}' "$key"
+done > /opt/dbaops-api/known_hosts
 chown -R dbaops:dbaops /opt/dbaops-api
+chmod 755 /opt/dbaops-api
 ```
 
-The service refuses to send passwords to an SSH server whose key is not in that file.
+This builds the localhost trust file directly from root-controlled sshd public keys, not from an
+unauthenticated network scan. The service refuses to send passwords to an SSH server whose key is
+not in that file.
+The final mode permits oracle to execute the enrollment CLI; secrets remain separately protected
+in `/etc/dbaops-api/dbaops.env`.
 
 ### Step 6. Create a virtual environment with Python 3.8 (root)
 
@@ -290,7 +291,8 @@ The rest:
 | `ccps` | The real ccps command, run in the oracle shell before ssh. |
 | `ccps_passphrase_env` | Environment variable holding the cp993 passphrase (default `CCPS_PASSPHRASE`). |
 | `ssh_user` | `null` connects as oracle (the current user). Set a name for `user@host`. |
-| `ssh_options` | Extra `ssh` options. Keep `BatchMode=yes` so ssh never waits for a password. |
+| `ssh_options` | Extra `ssh` options. Keep `BatchMode=yes` and `StrictHostKeyChecking=yes`; unknown and changed keys must fail closed. |
+| `target_host_fingerprints` | Exact target hostname to one or more trusted `SHA256:...` host-key fingerprints used by `enroll-host`. |
 | `host_pattern` | Regex every `host` must match. Tighten it to your naming standard, for example `^db[a-z0-9-]+(\\.corp\\.example\\.com)?$`. |
 | `allowed_hosts` | Optional exact list of DB servers. |
 | `scripts` | The allow-list (see below). |
@@ -315,6 +317,53 @@ Each script entry (the `//` notes are explanations only; JSON does not allow com
 
 `/scripts` and `/tools` are generated from this list, so your agent always sees the current allow-list.
 Keys that start with `_` are ignored, so you can use `"_comment"`.
+
+### Step 7a. Securely enroll each target SSH host key
+
+Obtain the target's SHA-256 host-key fingerprint over an independent trusted channel: target
+console, configuration management inventory, or a server administrator. For example, an
+administrator runs this **on the target itself**, not through the untrusted first SSH connection:
+
+```bash
+ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256
+```
+
+Add the exact reported fingerprint to `config.json`:
+
+```json
+"target_host_fingerprints": {
+  "dbprod01": ["SHA256:<exact-43-character-base64-digest>"]
+}
+```
+
+Keep `config.json` non-secret and readable by oracle, then enroll as oracle:
+
+```bash
+chmod 644 /opt/dbaops-api/config.json
+sudo -u oracle -H /opt/dbaops-api/venv/bin/python -m dbaops_api \
+  -c /opt/dbaops-api/config.json enroll-host --host dbprod01
+```
+
+On a first verified connection, the command returns JSON with `"status": "enrolled"` and appends
+only scanned keys matching a configured fingerprint to oracle's `~/.ssh/known_hosts` (mode 600).
+Repeating it returns `"status": "known"` without rescanning or changing the file. A mismatch exits
+2 without writing a key.
+
+Now test the complete path as oracle:
+
+```bash
+sudo -u oracle -H ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+  dbprod01 /dba/bin/dba_checkout
+```
+
+Runtime requests never enroll or replace keys. A changed key is rejected by OpenSSH and returned as
+`502 ssh_failed`. For an intentional key rotation, independently verify the new fingerprint, update
+`target_host_fingerprints`, remove the old entry with `ssh-keygen -R` as oracle, and rerun
+`enroll-host`.
+
+There is deliberately no automatic `accept-new` fallback: OpenSSH 7.4 on RHEL 7 does not support
+it, and trust-on-first-use cannot authenticate the first key. `StrictHostKeyChecking=no` is never
+appropriate for this service.
 
 ### Step 8. Inject the gateway xToken and ccps passphrase, then test as yourself (root)
 
@@ -543,6 +592,9 @@ sends `"confirm": true`, rather than letting the LLM set it on its own.
 - Passwords are accepted only over HTTPS (or from the jump server itself). They are never logged or
   written to disk, they are masked in returned output, and they are sent only to an SSH server whose
   host key is in `known_hosts`.
+- Target host keys are pre-enrolled only after an `ssh-keyscan` result matches an independently
+  obtained SHA-256 fingerprint. Runtime SSH uses `StrictHostKeyChecking=yes`; unknown and changed
+  keys are never accepted automatically.
 - The cp993 passphrase lives only in `/etc/dbaops-api/dbaops.env` (mode 640, root:dbaops). It reaches
   `ssh-add` through stdin and a one-time askpass helper. It is never on a command line, never logged,
   never passed to the target, and masked in output.
@@ -560,7 +612,7 @@ sends `"confirm": true`, rather than letting the LLM set it on its own.
 | symptom | cause and fix |
 | --- | --- |
 | Login `401` with the right password | sshd refuses password login from 127.0.0.1 (step 3), the account is locked (`faillock --user jsmith`), or the password has expired. Try `ssh jsmith@127.0.0.1` by hand. |
-| Login `502`, `host key ... is not in .../known_hosts` | Run the `ssh-keyscan` command from step 5. |
+| Login `502`, `host key ... is not in .../known_hosts` | Reinstall the verified local sshd public host keys as shown in step 5. |
 | Login `403`, `Refusing to accept a password over plain HTTP` | Call the service over `https://`. |
 | `502 become_failed`, `is not in the sudoers file` / `is not allowed to execute` | That person has no `sudo su - oracle` rule (step 2). |
 | `502 become_failed`, `incorrect password attempt` | sudo rejected the login password. This happens when sudo authenticates against something other than the login password. |
@@ -569,7 +621,8 @@ sends `"confirm": true`, rather than letting the LLM set it on its own.
 | `502 ccps_failed`, `No such file` or `bad permissions` | `~oracle/.ssh/cp993` is missing or not mode 600. |
 | `502 ccps_failed`, `check CCPS_PASSPHRASE` | The passphrase in `/etc/dbaops-api/dbaops.env` is wrong. Test it as oracle with `ssh-keygen -y -f ~/.ssh/cp993`, fix the file, then `systemctl restart dbaops-api`. |
 | `502 ccps_failed`, `set CCPS_PASSPHRASE` | cp993 has a passphrase but `CCPS_PASSPHRASE` is empty (step 8). |
-| `502 ssh_failed`, `Host key verification failed` | Add the target to `~oracle/.ssh/known_hosts` (step 1). |
+| `502 ssh_failed`, unknown host / `Host key verification failed` | Obtain the target fingerprint through an independent trusted channel and run `enroll-host` (step 7a). Never append unverified `ssh-keyscan` output. |
+| `502 ssh_failed`, `REMOTE HOST IDENTIFICATION HAS CHANGED` | Stop and investigate. The service correctly rejected a changed key. For a planned rotation only, verify the new fingerprint out of band, update config, remove the old entry, and rerun `enroll-host`. |
 | `502 ssh_failed`, `Permission denied (publickey)` | cp993's public key is not in the target's `authorized_keys`. |
 | `502 timeout` | The script ran longer than its `timeout`. Raise it for that script, and keep gunicorn's `--timeout` higher. |
 | `401 Unknown or expired session` right after logging in | gunicorn is running more than one worker. Use `--workers 1` as in the unit file. |
@@ -585,4 +638,6 @@ venv/bin/python -m pytest -q
 
 `tests/test_shell.py` runs the generated oracle shell for real, with `ssh-agent`, `ssh-add`, and
 `timeout`, against a stub `ssh`. `tests/test_pump.py` checks that the password is sent only when
-sudo's prompt appears and that input is closed afterwards.
+sudo's prompt appears and that input is closed afterwards. `tests/test_hostkeys.py` mocks
+`ssh-keygen`/`ssh-keyscan` to cover verified first enrollment, an existing known host, and a
+fingerprint mismatch without touching a real network.

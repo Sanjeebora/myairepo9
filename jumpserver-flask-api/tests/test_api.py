@@ -56,6 +56,16 @@ def test_service_fails_closed_without_configured_gateway_token(config_path, fake
         create_app(config_path, connector=fake.connect)
 
 
+def test_config_cannot_disable_strict_target_host_key_checking(config_path):
+    from dbaops_api.config import ConfigError, load_config
+
+    data = json.loads(open(config_path).read())
+    data["ssh_options"][-1] = "StrictHostKeyChecking=no"
+    open(config_path, "w").write(json.dumps(data))
+    with pytest.raises(ConfigError, match="stricthostkeychecking=yes"):
+        load_config(config_path)
+
+
 def test_failed_logins_are_rate_limited(client):
     for _ in range(5):
         assert login(client, "jsmith", "wrong").status_code == 401
@@ -227,6 +237,21 @@ def test_ssh_failure_is_502(client, headers, fake):
     resp = client.post("/run", headers=headers, json={"host": "db01", "script": "dba_checkout"})
     assert resp.status_code == 502
     assert resp.get_json()["status"] == "ssh_failed"
+
+
+def test_changed_target_host_key_is_strictly_rejected(client, headers, fake):
+    fake.returncode = 255
+    fake.stdout = ""
+    fake.stderr = (
+        "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n"
+        "@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n"
+        "Host key verification failed.\n")
+    resp = client.post(
+        "/run", headers=headers, json={"host": "db01", "script": "dba_checkout"})
+    assert resp.status_code == 502
+    body = resp.get_json()
+    assert body["status"] == "ssh_failed"
+    assert "HOST IDENTIFICATION HAS CHANGED" in body["error"]
 
 
 def test_sudo_not_allowed_is_502(client, headers, fake):
